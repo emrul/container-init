@@ -1,0 +1,12 @@
+PLAIN=hello
+WITH_SPACES_TRIMMED=trimmed
+DQ_PLAIN=double-quoted
+SQ_PLAIN=single-quoted
+DQ_WITH_DQ=he said "hi"
+SQ_WITH_DQ=he said "hi"
+SQ_WITH_BS=backslash \n stays literal
+CONCAT=foobarbaz
+EMPTY_DQ=
+EMPTY_SQ=
+DQ_WITH_DOLLAR=literal $1 $
+LEADING_TRAILING_WS=unq
