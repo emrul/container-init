@@ -5,7 +5,7 @@ import (
 	"net"
 	"os"
 
-	"github.com/emrul/container-init/internal/unit"
+	"github.com/emrul/container-init/unit"
 )
 
 // Bound holds the OS-level listener for a single .socket unit, kept

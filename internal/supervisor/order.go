@@ -3,7 +3,7 @@ package supervisor
 import (
 	"fmt"
 
-	"github.com/emrul/container-init/internal/unit"
+	"github.com/emrul/container-init/unit"
 )
 
 // topoSort returns units in start order: dependencies before dependents.

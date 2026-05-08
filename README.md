@@ -14,8 +14,8 @@ files an image author drops at `/etc/container-init/units/` and
 ```
 cmd/
   container-init/      PID 1 supervisor binary
+unit/                  unit-file parser + supported-directive validator + env expansion (public API)
 internal/
-  unit/                unit-file parser + supported-directive validator + env expansion
   supervisor/          goroutine-per-service supervision
   socketact/           socket activation (native + proxy)
   cgroup/              per-unit cgroup-v2 placement + cgroup.kill teardown
@@ -24,6 +24,11 @@ internal/
   userdb/              /etc/passwd + /etc/group resolution for User= / Group=
 Makefile
 ```
+
+`unit/` is the only exported package — downstream images can import it
+for property-level corpus tests against their unit files. Everything
+else stays internal so the supervisor / socket-activation / cgroup
+internals remain free to evolve.
 
 ## Building
 

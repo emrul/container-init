@@ -25,7 +25,7 @@ import (
 	"github.com/emrul/container-init/internal/pid1"
 	"github.com/emrul/container-init/internal/socketact"
 	"github.com/emrul/container-init/internal/trace"
-	"github.com/emrul/container-init/internal/unit"
+	"github.com/emrul/container-init/unit"
 	"github.com/emrul/container-init/internal/userdb"
 )
 

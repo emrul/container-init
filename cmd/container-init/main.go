@@ -15,7 +15,7 @@ import (
 	"github.com/emrul/container-init/internal/pid1"
 	"github.com/emrul/container-init/internal/supervisor"
 	"github.com/emrul/container-init/internal/trace"
-	"github.com/emrul/container-init/internal/unit"
+	"github.com/emrul/container-init/unit"
 )
 
 func main() {
