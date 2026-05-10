@@ -31,10 +31,6 @@ func TestManagerLifecycle(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 	pid := cmd.Process.Pid
-	defer func() {
-		_ = syscall.Kill(pid, syscall.SIGKILL)
-		_, _ = cmd.Process.Wait()
-	}()
 
 	if err := m.Place("test-unit.service", pid); err != nil {
 		t.Fatalf("Place: %v", err)
@@ -46,22 +42,24 @@ func TestManagerLifecycle(t *testing.T) {
 		t.Fatalf("Kill: %v", err)
 	}
 
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if err := syscall.Kill(pid, 0); err != nil && err == syscall.ESRCH {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
+	// cgroup.kill sends SIGKILL but the process stays in the zombie
+	// state until reaped. Reap it first, then verify the PID is gone.
+	waited := make(chan error, 1)
+	go func() { _, err := cmd.Process.Wait(); waited <- err }()
+	select {
+	case <-waited:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("pid %d did not exit within 3s after cgroup.kill", pid)
 	}
 	if err := syscall.Kill(pid, 0); err == nil {
-		t.Errorf("pid %d still alive after cgroup.kill", pid)
+		t.Errorf("pid %d still exists after cgroup.kill", pid)
 	}
 }
 
 // TestManagerNoopWhenUnavailable pins the fallback contract: every op
 // returns a non-nil error and never panics when Available is false.
 func TestManagerNoopWhenUnavailable(t *testing.T) {
-	m := &Manager{} // not New() — explicit unavailable manager
+	m := &Manager{} // not New() -- explicit unavailable manager
 	if m.Available() {
 		t.Fatal("zero-value manager should report Available=false")
 	}
@@ -82,10 +80,11 @@ func TestManagerNoopWhenUnavailable(t *testing.T) {
 	}
 }
 
-// TestSanitizePassesThrough pins today's behaviour — unit names round-trip.
+// TestSanitizePassesThrough pins today's behaviour -- unit names round-trip.
 func TestSanitizePassesThrough(t *testing.T) {
 	for _, name := range []string{"foo.service", "web.service", "audio-out-ws.socket"} {
-		if got := sanitize(name); got != name {
+		got := sanitize(name)
+		if got != name {
 			t.Errorf("sanitize(%q) = %q, want %q", name, got, name)
 		}
 		if strings.ContainsAny(got, "/") {

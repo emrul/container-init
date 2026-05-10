@@ -54,7 +54,7 @@ func evaluateConditions(u *Unit, lookup Lookup) {
 		}
 	}
 	for _, e := range u.ConditionEnvironment {
-		// "VAR=value" — present and equal required; "VAR" — present required.
+		// "VAR=value" -- present and equal required; "VAR" -- present required.
 		eq := strings.IndexByte(e, '=')
 		if eq < 0 {
 			if _, ok := lookup(e); !ok {

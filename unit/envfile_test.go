@@ -269,7 +269,7 @@ func TestEnvfileCorpus(t *testing.T) {
 		saw++
 	}
 	if saw == 0 {
-		t.Errorf("no corpus fixtures under testdata/envfile/ — at least one expected")
+		t.Errorf("no corpus fixtures under testdata/envfile/ -- at least one expected")
 	}
 }
 

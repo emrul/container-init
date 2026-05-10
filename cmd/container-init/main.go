@@ -18,12 +18,21 @@ import (
 	"github.com/emrul/container-init/unit"
 )
 
+// version is set at build time via -ldflags "-X main.version=...".
+var version = "dev"
+
 func main() {
 	dir := flag.String("units", "/etc/container-init/units", "directory containing core .service / .socket files")
 	dropIn := flag.String("drop-in", "/etc/container-init.d", "directory containing image-author drop-ins (override core by name)")
 	strict := flag.Bool("strict-units", false, "fail fast on any parser warning (unknown directive / section)")
 	validate := flag.Bool("validate", false, "load + parse units, print summary, exit without supervising (build-time sanity)")
+	versionFlag := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+
+	if *versionFlag {
+		fmt.Println("container-init", version)
+		os.Exit(0)
+	}
 
 	log.SetFlags(0)
 	log.SetPrefix("container-init: ")

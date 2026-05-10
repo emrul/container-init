@@ -15,7 +15,7 @@ import (
 // Concurrency: exec.Cmd starts independent io.Copy goroutines for
 // stdout and stderr; the mutex keeps each write atomic at line
 // granularity so concurrent stdout/stderr writes don't interleave
-// inside a single line. Cross-unit interleaving is unchanged — the
+// inside a single line. Cross-unit interleaving is unchanged -- the
 // kernel guarantees atomicity for writes ≤ PIPE_BUF (4096) on the
 // pipe to journald, and our per-line writes are well under that.
 type linePrefixWriter struct {

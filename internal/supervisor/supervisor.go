@@ -36,7 +36,7 @@ type Supervisor struct {
 	tracer     *trace.Tracer
 	dispatcher *pid1.Dispatcher
 	cgroup     *cgroup.Manager
-	postLabels string // CONTAINER_INIT_TRACE_LABELS — image policy
+	postLabels string // CONTAINER_INIT_TRACE_LABELS -- image policy
 	stopOnce   sync.Once
 	stopCh     chan struct{}
 	doneCh     chan struct{}
@@ -105,7 +105,7 @@ func New(units []*unit.Unit, tracer *trace.Tracer, dispatcher *pid1.Dispatcher, 
 
 // signalReady closes the ready channel for unit, unblocking any
 // runService goroutine that's waiting on its After= / Requires=. Safe
-// to call repeatedly — the close is single-shot via sync.Once
+// to call repeatedly -- the close is single-shot via sync.Once
 // underneath.
 func (s *Supervisor) signalReady(name string) {
 	s.mu.Lock()
@@ -135,7 +135,7 @@ func (s *Supervisor) waitDeps(u *unit.Unit) bool {
 		ch, ok := s.ready[name]
 		s.mu.Unlock()
 		if !ok {
-			continue // unknown dep — skip silently (matches addEdge's behaviour in topoSort)
+			continue // unknown dep -- skip silently (matches addEdge's behaviour in topoSort)
 		}
 		select {
 		case <-ch:
@@ -171,7 +171,7 @@ func (s *Supervisor) Run() int {
 		s.bindSocket(u)
 		s.signalReady(u.Name)
 		// Socket-attached service is "ready" the moment the socket
-		// listens — that's the contract of socket activation: clients
+		// listens -- that's the contract of socket activation: clients
 		// connect, kernel queues, helper cold-starts on demand.
 		if u.Service != "" {
 			s.signalReady(u.Service)
@@ -286,13 +286,13 @@ func (s *Supervisor) runService(u *unit.Unit) {
 			}
 		}
 		if failed && u.ExitContainerOnFailure {
-			log.Printf("unit %s: ExitContainerOnFailure — initiating reverse shutdown", u.Name)
+			log.Printf("unit %s: ExitContainerOnFailure -- initiating reverse shutdown", u.Name)
 			s.Stop()
 			return
 		}
 		if !shouldRestart(u, failed) {
 			// Unblock any dependents that were waiting on a oneshot
-			// that's now done (success or terminal failure) — without
+			// that's now done (success or terminal failure) -- without
 			// this, a Type=oneshot Restart=no that ran and exited 0
 			// would not signal because the success-signal above
 			// flipped first=false; that's fine. Failed oneshots stay
@@ -333,7 +333,7 @@ func (s *Supervisor) fireOnFailure(name string) {
 // spawnAndWait runs u's ExecStart once. If extra is non-nil, the
 // service is socket-activated in native mode and the listening fd is
 // passed via socketact.PrepareNative. onSpawned (if non-nil) fires
-// after dispatcher.Spawn returns and the cgroup placement has run —
+// after dispatcher.Spawn returns and the cgroup placement has run --
 // callers use this to mark Type=simple/forking services ready as
 // soon as the fork-exec succeeds, without waiting for the long-running
 // process to exit.
@@ -347,7 +347,7 @@ func (s *Supervisor) spawnAndWait(u *unit.Unit, extra *socketact.Bound, onSpawne
 	// drain the child's stdout/stderr into these writers, which inject
 	// "[unit] " in front of every newline-terminated line. The
 	// goroutines exit when the child closes the pipes (i.e. on exit),
-	// so we don't need to call cmd.Wait — the pid1 dispatcher still
+	// so we don't need to call cmd.Wait -- the pid1 dispatcher still
 	// owns reaping. Mimics journald's _SYSTEMD_UNIT= grouping for
 	// people grepping the container log.
 	prefix := "[" + unitLabel(u.Name) + "] "
@@ -366,7 +366,7 @@ func (s *Supervisor) spawnAndWait(u *unit.Unit, extra *socketact.Bound, onSpawne
 		// Replace HOME / USER / LOGNAME with the resolved identity's
 		// values. This wins over both the inherited container-init
 		// environment AND any matching key in u.Environment from the
-		// unit file — User= is the source of truth for who the
+		// unit file -- User= is the source of truth for who the
 		// process is, so its environment should match. If a unit
 		// genuinely needs a divergent HOME (rare), it should set
 		// WorkingDirectory and the script can compute its own.
@@ -432,7 +432,7 @@ func (s *Supervisor) spawnAndWait(u *unit.Unit, extra *socketact.Bound, onSpawne
 	var es pid1.ExitStatus
 	select {
 	case <-s.stopCh:
-		// Reverse shutdown — kick the child via SIGTERM and still
+		// Reverse shutdown -- kick the child via SIGTERM and still
 		// block on the dispatcher so state.exited is honest.
 		_ = syscall.Kill(pid, syscall.SIGTERM)
 		es = <-exitCh
@@ -500,7 +500,7 @@ func (s *Supervisor) driveNative(sock *unit.Unit, bound *socketact.Bound) {
 		return
 	}
 	// Honour the helper service's After= / Requires= before its first
-	// spawn — the socket has been listening since Pass 1, so a client
+	// spawn -- the socket has been listening since Pass 1, so a client
 	// may have queued bytes already; we still don't exec the helper
 	// until prerequisite oneshot units have completed.
 	if !s.waitDeps(svc) {

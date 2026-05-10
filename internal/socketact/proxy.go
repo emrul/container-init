@@ -47,7 +47,7 @@ type closeWriter interface{ CloseWrite() error }
 
 // dialWithRetry retries until the helper's private endpoint becomes
 // reachable or totalTimeout elapses. Backoff starts at 25ms and caps
-// at 200ms — short because the helper is local and we want first-byte
+// at 200ms -- short because the helper is local and we want first-byte
 // latency low.
 func dialWithRetry(network, target string, dialTimeout, totalTimeout time.Duration) (net.Conn, error) {
 	deadline := time.Now().Add(totalTimeout)

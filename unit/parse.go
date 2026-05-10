@@ -17,7 +17,7 @@ import (
 // (OSLookup) reads container-init's own environment.
 type Lookup func(string) (string, bool)
 
-// OSLookup is the production Lookup — reads from os.Environ().
+// OSLookup is the production Lookup -- reads from os.Environ().
 func OSLookup(k string) (string, bool) { return os.LookupEnv(k) }
 
 // Options configures unit loading. Zero value is usable: defaults to
@@ -65,7 +65,7 @@ type Override struct {
 // additive. Each replacement is recorded in the returned overrides
 // slice so callers can log "overridden by <drop-in path>" at boot.
 //
-// Empty / missing directories are skipped silently — operators who
+// Empty / missing directories are skipped silently -- operators who
 // don't ship a /etc/container-init.d/ shouldn't see a load error.
 func LoadOverlay(dirs []string, opts Options) ([]*Unit, []Warning, []Override, error) {
 	if opts.Lookup == nil {
@@ -92,7 +92,7 @@ func LoadOverlay(dirs []string, opts Options) ([]*Unit, []Warning, []Override, e
 		warnings = append(warnings, ws...)
 		if err != nil {
 			errs = append(errs, err.Error())
-			// continue — still apply units that loaded
+			// continue -- still apply units that loaded
 		}
 		for _, u := range us {
 			if prev, ok := byName[u.Name]; ok {
@@ -125,7 +125,7 @@ func LoadOverlay(dirs []string, opts Options) ([]*Unit, []Warning, []Override, e
 
 // LoadDir parses every *.service / *.socket in dir. Returns the units
 // in deterministic load order (filename sort), the collected warnings,
-// and a non-nil error if any file failed fatally — or, in strict mode,
+// and a non-nil error if any file failed fatally -- or, in strict mode,
 // if any warnings were emitted.
 func LoadDir(dir string, opts Options) ([]*Unit, []Warning, error) {
 	if opts.Lookup == nil {

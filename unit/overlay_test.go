@@ -69,7 +69,7 @@ func TestLoadOverlayOverrideByName(t *testing.T) {
 func TestLoadOverlayMissingDirSkipped(t *testing.T) {
 	core := t.TempDir()
 	writeUnit(t, core, "a.service", "[Service]\nExecStart=/bin/true\n")
-	// drop dir intentionally absent — operators don't always ship one.
+	// drop dir intentionally absent -- operators don't always ship one.
 	units, warnings, overrides, err := LoadOverlay([]string{core, filepath.Join(core, "definitely-not-here")}, Options{})
 	if err != nil {
 		t.Fatalf("LoadOverlay: %v", err)

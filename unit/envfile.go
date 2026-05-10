@@ -24,11 +24,11 @@ import (
 //   - Values are a sequence of unquoted, '...'-quoted, and "..."-quoted
 //     segments. Adjacent segments concatenate. Leading and trailing
 //     whitespace is stripped from unquoted segments at the line level.
-//   - Inside '...' the value is literal — no escape processing.
+//   - Inside '...' the value is literal -- no escape processing.
 //   - Inside "..." the recognised escapes are \" \\ \n \t \r \a \b \f
 //     \v \' \$ \space; everything else is preserved verbatim. systemd
 //     does NOT expand $VAR / ${VAR} inside double quotes, and neither
-//     do we — that variable-expansion layer is the directive-value
+//     do we -- that variable-expansion layer is the directive-value
 //     ${VAR}/${VAR:-default} substitution that already runs over the
 //     EnvironmentFile= path before we reach this function.
 //
@@ -65,7 +65,7 @@ func parseEnvFileReader(r io.Reader) ([]string, error) {
 		}
 		// Line continuation joins the next physical line. Done at the
 		// physical-line layer so it works regardless of whether the
-		// trailing "\" sits inside or outside quotes — matches systemd.
+		// trailing "\" sits inside or outside quotes -- matches systemd.
 		if strings.HasSuffix(line, "\\") && !endsWithEscapedBackslash(line) {
 			joined.WriteString(line[:len(line)-1])
 			continue
@@ -230,7 +230,7 @@ func readDQuoted(s string) (string, int, error) {
 	return "", 0, fmt.Errorf("unterminated double-quoted value")
 }
 
-// readSQuoted parses one '...' segment. No escape processing — the
+// readSQuoted parses one '...' segment. No escape processing -- the
 // content is literal up to the matching closing quote.
 func readSQuoted(s string) (string, int, error) {
 	if len(s) == 0 || s[0] != '\'' {

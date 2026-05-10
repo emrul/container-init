@@ -1,6 +1,6 @@
 // Package userdb resolves User= / Group= directive values to numeric
 // uid/gid plus supplementary group lists by reading /etc/passwd and
-// /etc/group directly. We do not shell out to id(1) / getent(1) — the
+// /etc/group directly. We do not shell out to id(1) / getent(1) -- the
 // extra fork-exec is gratuitous when /etc/passwd is a few KiB of text
 // and we already need to handle the lookup synchronously inside the
 // supervisor's pre-exec path.
@@ -57,7 +57,7 @@ func Resolve(user, group, homeOverride string) (Identity, error) {
 			id.GID = e.gid
 			id.Home = e.home
 		} else {
-			// Numeric uid, no /etc/passwd entry — accept and continue
+			// Numeric uid, no /etc/passwd entry -- accept and continue
 			// with synthetic name; supplementary group lookup needs
 			// a username so leave SupplementaryGroups empty.
 			id.Username = user

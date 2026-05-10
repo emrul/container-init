@@ -77,7 +77,7 @@ func (d *Dispatcher) Done() <-chan struct{} { return d.done }
 
 // Spawn fork-execs cmd under the dispatcher lock so that SIGCHLD
 // delivery cannot race the pid-to-channel registration. Callers MUST
-// use this entry point rather than cmd.Start directly — without
+// use this entry point rather than cmd.Start directly -- without
 // atomic registration, a fast-exiting child can deliver SIGCHLD
 // before the supervisor has filed its consumer channel, and the exit
 // status is silently dropped.
@@ -100,7 +100,7 @@ func (d *Dispatcher) Spawn(cmd *exec.Cmd) (int, <-chan ExitStatus, error) {
 
 // Track is the lower-level entry point that registers a pid the
 // caller has already created (e.g. a grandchild discovered via
-// PIDFile=). The same race-window caveat applies as for Spawn — the
+// PIDFile=). The same race-window caveat applies as for Spawn -- the
 // caller must guarantee the PID hasn't been waited on by anyone else
 // since fork. Returns the channel that will receive the eventual
 // reap status.
@@ -156,7 +156,7 @@ func (d *Dispatcher) drain() {
 		}
 		ch, ok := d.pending[pid]
 		if !ok {
-			// Orphan — re-parented grandchild, silently reaped. This
+			// Orphan -- re-parented grandchild, silently reaped. This
 			// is the path that catches dbus-launch's daemon child
 			// after the launcher exits.
 			continue

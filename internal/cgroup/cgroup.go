@@ -10,7 +10,7 @@
 // cgroup.kill to take everything out atomically.
 //
 // Falls back to a no-op manager when cgroup-v2 is not mounted or not
-// writable here — the supervisor then relies on the legacy SIGTERM
+// writable here -- the supervisor then relies on the legacy SIGTERM
 // path. Detection is best-effort and recorded in Err() for trace.
 package cgroup
 
@@ -46,7 +46,7 @@ type Manager struct {
 }
 
 // New initialises the manager. A nil error from this constructor is
-// not the success signal — call Available() / Err() after to learn
+// not the success signal -- call Available() / Err() after to learn
 // whether cgroup-v2 is reachable here.
 func New() *Manager {
 	m := &Manager{units: make(map[string]string)}
@@ -74,7 +74,7 @@ func (m *Manager) Err() error { return m.err }
 func (m *Manager) Base() string { return m.base }
 
 // Mkdir creates (idempotently) the per-unit cgroup directory and
-// returns its absolute path. Safe to call before every spawn —
+// returns its absolute path. Safe to call before every spawn --
 // subsequent calls just look up the existing entry.
 func (m *Manager) Mkdir(unit string) (string, error) {
 	if !m.available {
@@ -95,7 +95,7 @@ func (m *Manager) Mkdir(unit string) (string, error) {
 
 // Place migrates pid into unit's cgroup by writing to cgroup.procs.
 // Subsequent fork(2)s by the placed process inherit the cgroup
-// automatically — so any double-fork descendants land in the same
+// automatically -- so any double-fork descendants land in the same
 // killable group.
 func (m *Manager) Place(unit string, pid int) error {
 	if !m.available {
@@ -147,7 +147,7 @@ func (m *Manager) HasMembers(unit string) bool {
 }
 
 // Remove deletes the per-unit cgroup directory. Safe even when the
-// cgroup is non-empty — rmdir(2) on a non-empty cgroup-v2 directory
+// cgroup is non-empty -- rmdir(2) on a non-empty cgroup-v2 directory
 // returns EBUSY which we surface so the caller can retry after
 // Kill+drain.
 func (m *Manager) Remove(unit string) error {
@@ -166,7 +166,7 @@ func (m *Manager) Remove(unit string) error {
 
 // detect locates the writable cgroup-v2 dir for container-init's own
 // cgroup and creates the container-init/ subdirectory under it.
-// Failure here means cgroup-v2 isn't usable — the caller falls back
+// Failure here means cgroup-v2 isn't usable -- the caller falls back
 // to the legacy PGID path.
 func detect() (string, error) {
 	if _, err := os.Stat(filepath.Join(cgroupRoot, "cgroup.controllers")); err != nil {

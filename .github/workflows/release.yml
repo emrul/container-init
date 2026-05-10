@@ -1,0 +1,33 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build binaries
+        run: make build VERSION=${{ github.ref_name }}
+
+      - name: Create GitHub release
+        run: |
+          gh release create ${{ github.ref_name }} \
+            --title "container-init ${{ github.ref_name }}" \
+            --generate-notes \
+            bin/container-init.linux-amd64 \
+            bin/container-init.linux-arm64
+        env:
+          GH_TOKEN: ${{ github.token }}

@@ -77,7 +77,7 @@ func (t *Tracer) Close() {
 	}
 }
 
-// Phase is a begin/end pair — the End call emits a record with
+// Phase is a begin/end pair -- the End call emits a record with
 // dt_ms = wallclock elapsed from Begin to End (matching the bash
 // trace_phase_begin / trace_phase_end semantics).
 type Phase struct {

@@ -6,11 +6,11 @@ import (
 
 // Expand resolves ${VAR} and ${VAR:-default} references in s against
 // the provided lookup function. Bare $VAR and other shell forms are
-// not recognised — only the brace forms are part of the directive-value
+// not recognised -- only the brace forms are part of the directive-value
 // expansion contract.
 //
 // Defaults may themselves contain ${...} references, e.g.
-// ${APP_AUTH:-default:${APP_PW}} — nested references are resolved
+// ${APP_AUTH:-default:${APP_PW}} -- nested references are resolved
 // recursively. Brace depth is tracked when scanning for the outer
 // '}' so the FIRST '}' inside the default doesn't prematurely close
 // the outer reference.
@@ -35,7 +35,7 @@ func Expand(s string, lookup func(string) (string, bool)) string {
 			i++
 			continue
 		}
-		// '$' at end of string — emit literally.
+		// '$' at end of string -- emit literally.
 		if i+1 >= len(s) {
 			b.WriteByte('$')
 			i++
@@ -56,7 +56,7 @@ func Expand(s string, lookup func(string) (string, bool)) string {
 		}
 		end, ok := findClose(s, i+2)
 		if !ok {
-			// Unterminated ${ — emit verbatim and stop trying to
+			// Unterminated ${ -- emit verbatim and stop trying to
 			// parse further references.
 			b.WriteString(s[i:])
 			return b.String()

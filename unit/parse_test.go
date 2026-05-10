@@ -423,7 +423,7 @@ ExecStart=/bin/echo %n %N
 
 // TestBadValueIsError ensures that malformed values for known
 // directives still fail the parse (warnings are reserved for *unknown*
-// directives, not malformed ones — those produce immediate errors).
+// directives, not malformed ones -- those produce immediate errors).
 func TestBadValueIsError(t *testing.T) {
 	cases := []struct {
 		name string

@@ -8,6 +8,6 @@
 // reparented onto PID 1) are reaped silently. Design note
 // #1 ("a separate wait4 reaper races os/exec.Cmd.Wait and steals
 // exit statuses") is closed because the supervisor never calls
-// cmd.Wait — Spawn is the single fork-exec entry point and the
+// cmd.Wait -- Spawn is the single fork-exec entry point and the
 // dispatcher is the single source of reap status.
 package pid1

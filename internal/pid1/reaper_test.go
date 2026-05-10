@@ -112,7 +112,7 @@ func TestDispatcherOrphanReaped(t *testing.T) {
 
 	// Give SIGCHLD time to land for the orphaned sleep. The drain
 	// should reap it without us tracking it; verify by polling
-	// /proc/[orphan]/status — but easier: just wait a beat and
+	// /proc/[orphan]/status -- but easier: just wait a beat and
 	// confirm the dispatcher's pending map is empty (no leftover
 	// state) and the test isn't leaking a zombie. wait4 with WNOHANG
 	// from outside the dispatcher would race; instead we use the

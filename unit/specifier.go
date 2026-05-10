@@ -38,7 +38,7 @@ func UnitSpecifiers(fileName string) SpecifierLookup {
 
 // ExpandSpecifiers replaces %n / %N / %H in s using lookup. A literal
 // "%%" yields a single "%". Unknown specifiers (lookup returns
-// ok=false) pass through verbatim — the parse path elsewhere can decide
+// ok=false) pass through verbatim -- the parse path elsewhere can decide
 // whether to warn about them; we don't drop the bytes silently.
 func ExpandSpecifiers(s string, lookup SpecifierLookup) string {
 	if !strings.ContainsRune(s, '%') {

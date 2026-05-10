@@ -111,7 +111,7 @@ func TestResolveUnknownUser(t *testing.T) {
 }
 
 func TestResolveNumericNoPasswdEntry(t *testing.T) {
-	// Numeric uid, no /etc/passwd entry — Resolve should still
+	// Numeric uid, no /etc/passwd entry -- Resolve should still
 	// succeed with synthetic name; supplementary groups empty.
 	withFakeFiles(t, samplePasswd, sampleGroup)
 	got, err := Resolve("9999", "", "")

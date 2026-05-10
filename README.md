@@ -1,5 +1,10 @@
 # container-init
 
+[![CI](https://github.com/emrul/container-init/actions/workflows/ci.yml/badge.svg)](https://github.com/emrul/container-init/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/emrul/container-init)](https://github.com/emrul/container-init/releases/latest)
+[![Go version](https://img.shields.io/github/go-mod/go-version/emrul/container-init)](go.mod)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
+
 A small PID 1 supervisor for container images. Reads a documented
 subset of systemd unit files, supervises services, and provides
 socket activation in two modes (native via `sd_listen_fds`, and proxy
@@ -8,6 +13,34 @@ for unmodified upstream binaries).
 The binary is generic; image-specific behaviour lives in the unit
 files an image author drops at `/etc/container-init/units/` and
 `/etc/container-init.d/`.
+
+## Motivation
+
+This project was inspired by
+[docker-systemctl-replacement](https://github.com/gdraheim/docker-systemctl-replacement),
+a Python script that replaces `/usr/bin/systemctl` inside containers so that
+standard systemd unit files work without a full systemd daemon. It solves the
+right problem, but it carries a Python runtime dependency and starts services
+sequentially, both of which add friction and latency.
+
+container-init addresses those constraints:
+
+- **No runtime dependency.** A single statically-linked binary (≤ 8 MiB, no
+  CGO); no Python, no interpreter, no shared-library surprises.
+- **Faster cold starts.** Services with no inter-dependencies start
+  concurrently. Socket activation lets the binary bind public ports immediately
+  and defer heavyweight services until the first real connection.
+
+### PID 1 problems -- also solved here
+
+The [PID 1 problems](https://github.com/gdraheim/docker-systemctl-replacement#problems-with-pid-1-in-docker) documented by `docker-systemctl-replacement` are solved the same way:
+
+| Problem | How container-init addresses it |
+|---|---|
+| **Zombie accumulation** | `internal/pid1` owns a dedicated SIGCHLD-driven `wait4(-1)` loop. Every reparented grandchild -- from `dbus-launch`, `Type=forking` units, or any process that re-parents onto PID 1 -- is reaped silently and immediately. |
+| **SIGTERM not reaching children** | `docker stop` sends SIGTERM to PID 1; the dispatcher forwards it to every supervised child before the stop timeout expires. |
+| **Unordered / incomplete shutdown** | Reverse-dependency shutdown tears services down in reverse `After=` / `Requires=` order, giving each its `TimeoutStopSec` before SIGKILL. |
+| **Service startup at boot** | The supervisor reads unit files and starts all services at launch, respecting `After=` / `Requires=` ordering -- no bespoke shell scripts needed. |
 
 ## Layout
 
@@ -25,7 +58,7 @@ internal/
 Makefile
 ```
 
-`unit/` is the only exported package — downstream images can import it
+`unit/` is the only exported package -- downstream images can import it
 for property-level corpus tests against their unit files. Everything
 else stays internal so the supervisor / socket-activation / cgroup
 internals remain free to evolve.
@@ -43,9 +76,9 @@ The binary is statically linked, CGO disabled, ≤ 8 MiB.
 
 container-init reads from two directories, in priority order:
 
-1. **`/etc/container-init/units/`** — core unit files installed by the
+1. **`/etc/container-init/units/`** -- core unit files installed by the
    base image.
-2. **`/etc/container-init.d/`** — drop-ins shipped by derived images
+2. **`/etc/container-init.d/`** -- drop-ins shipped by derived images
    that layer on top of the base. Drop-ins go through the same parser
    and validator as core; they can reference core units via `After=`
    / `Requires=` / `OnFailure=`.
@@ -54,13 +87,13 @@ Both paths are configurable via the `--units` and `--drop-in` flags.
 
 The `--strict-units` flag promotes any parser warning (unknown
 directive / section, unsupported value form) into a fatal load error
-— useful in CI to catch typos before they ship.
+-- useful in CI to catch typos before they ship.
 
 The `--validate` flag loads + parses units, prints a summary, and
 exits without supervising. Combined with `--strict-units`, this is a
 build-time sanity check.
 
-## Extension point — `/etc/container-init.d/`
+## Extension point -- `/etc/container-init.d/`
 
 The first-class way for layered images to add their own services or
 replace core ones.
@@ -78,7 +111,7 @@ container-init: drop-in override: web.service replaces /etc/container-init/units
 The trace JSONL (when `CONTAINER_INIT_TRACE=1`) emits an
 `unit_overridden` event so dashboards can spot overlays at a glance.
 
-A drop-in with any *other* name is **additive** — added to the unit
+A drop-in with any *other* name is **additive** -- added to the unit
 graph, parsed, supervised, and shut down alongside the core set.
 
 ### Naming conventions
@@ -87,7 +120,7 @@ graph, parsed, supervised, and shut down alongside the core set.
   core unit you want to replace. There is no namespacing; full
   filename match is the override key.
 - Recommended convention for additive units:
-  `<image-name>-<service>.service` —
+  `<image-name>-<service>.service` --
   e.g. `chrome-launcher.service`, `vscode-server.service`.
 
 ### Validation
@@ -100,17 +133,17 @@ file + section + directive (default) or fail-fast (`--strict-units`).
 
 Drop-ins participate in the supervisor's full lifecycle:
 
-- **Restart= / RestartSec= / StartLimitBurst= / StartLimitIntervalSec=** —
+- **Restart= / RestartSec= / StartLimitBurst= / StartLimitIntervalSec=** --
   per-unit restart policy and rate limiting.
-- **ConditionPathExists= / ConditionPathExistsGlob= / ConditionEnvironment=** —
+- **ConditionPathExists= / ConditionPathExistsGlob= / ConditionEnvironment=** --
   unit is loaded but skipped at boot when conditions are unmet.
-- **OnFailure=** — invoke a sibling oneshot when this unit's restart
+- **OnFailure=** -- invoke a sibling oneshot when this unit's restart
   policy is exhausted; chains across the core/drop-in boundary
   identically.
-- **ExitContainerOnFailure=true** — fail-secure: take the whole
+- **ExitContainerOnFailure=true** -- fail-secure: take the whole
   container down via reverse shutdown when this unit's failure path
   is reached. Useful for compliance gates an image author owns.
-- **User= / Group= / WorkingDirectory=** — privilege drop. Accepts
+- **User= / Group= / WorkingDirectory=** -- privilege drop. Accepts
   the `${VAR:-default}` env-expansion form so per-image overrides
   flow through automatically.
 
@@ -162,7 +195,7 @@ listener fd over on first connect:
 ```ini
 # /etc/container-init.d/myhelper.socket
 [Unit]
-Description=My helper — public listener
+Description=My helper -- public listener
 
 [Socket]
 ListenStream=5050
@@ -272,4 +305,4 @@ capture a labelled `mem_snapshot` after specific units come up.
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE).
+Apache License 2.0 -- see [LICENSE](LICENSE).
