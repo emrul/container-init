@@ -1,7 +1,7 @@
 # container-init
 
 [![CI](https://github.com/emrul/container-init/actions/workflows/ci.yml/badge.svg)](https://github.com/emrul/container-init/actions/workflows/ci.yml)
-[![Latest release](https://img.shields.io/github/v/release/emrul/container-init)](https://github.com/emrul/container-init/releases/latest)
+[![Latest release](https://img.shields.io/github/v/release/emrul/container-init?style=flat)](https://github.com/emrul/container-init/releases/latest)
 [![Go version](https://img.shields.io/github/go-mod/go-version/emrul/container-init)](go.mod)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 
