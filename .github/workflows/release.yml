@@ -28,6 +28,8 @@ jobs:
             --title "container-init ${{ github.ref_name }}" \
             --generate-notes \
             bin/container-init.linux-amd64 \
-            bin/container-init.linux-arm64
+            bin/container-init.linux-arm64 \
+            bin/systemd1-shim.linux-amd64 \
+            bin/systemd1-shim.linux-arm64
         env:
           GH_TOKEN: ${{ github.token }}

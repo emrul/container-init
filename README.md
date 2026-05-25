@@ -93,6 +93,97 @@ The `--validate` flag loads + parses units, prints a summary, and
 exits without supervising. Combined with `--strict-units`, this is a
 build-time sanity check.
 
+## systemd1 D-Bus compatibility shim
+
+Some desktop apps detect "real systemd" by spawning `systemd-run` and
+fail if the call doesn't succeed. The notable case is GNOME Ptyxis,
+which wraps every shell it opens with
+`systemd-run --user --scope …` -- if that returns non-zero, every
+terminal tab shows up as "Terminal (Failed)". Older `gnome-terminal`
+versions, GNOME apps that use Flatpak's `host-spawn`, and anything
+that calls `systemd-run` from a shell script land in the same place.
+
+container-init ships an optional shim that answers
+`org.freedesktop.systemd1.Manager.StartTransientUnit` (plus the
+supporting Start/Stop/Reload/Restart-Unit, GetUnit, ListUnits,
+Subscribe, Reload, Reexecute, Introspect, and Properties surface for
+unit objects) well enough to make `systemd-run` exit 0. It is a
+**compatibility surface, not an implementation**: no cgroup is
+created, no resource limits are enforced, properties like `Slice=`,
+`MemoryMax=`, `CPUQuota=`, `PIDs=` are accepted and ignored.
+
+### Two ways to run it
+
+**A. Built into PID 1 (`--systemd1-shim` flag).** Suitable when the
+target bus accepts ownership requests from root -- typically the
+system bus or a permissively-configured custom bus. The session bus
+owned by an unprivileged user (kasm-user, your-desktop-user, etc.)
+will reject a root connection's `RequestName` via EXTERNAL auth's
+uid-match check, so this path **does not** help for desktop session
+buses.
+
+```
+ExecStart=/usr/local/bin/container-init --systemd1-shim=system
+```
+
+**B. Standalone binary (`/usr/local/bin/systemd1-shim`) supervised
+as the bus owner.** This is the right shape for desktop sessions:
+container-init runs the binary as the user who owns the session bus,
+so EXTERNAL auth succeeds and `org.freedesktop.systemd1` is exposed
+on the bus the user's apps already talk to. Ship a drop-in:
+
+```ini
+# /etc/container-init.d/systemd1-shim.service
+[Unit]
+Description=systemd1 D-Bus compatibility shim
+After=session-setup.service
+Requires=session-setup.service
+
+[Service]
+Type=simple
+User=app-user
+EnvironmentFile=/tmp/dbus.env  # exports DBUS_SESSION_BUS_ADDRESS
+ExecStart=/usr/local/bin/systemd1-shim
+Restart=on-failure
+RestartSec=2s
+```
+
+With no `--address` flag the binary reads `$DBUS_SESSION_BUS_ADDRESS`
+from its environment. Pass `--address=…` if you want to override.
+
+### Bus-address forms
+
+Both entry points accept the same address vocabulary:
+
+| Form | Resolves to |
+|---|---|
+| `system` | the system bus (`$DBUS_SYSTEM_BUS_ADDRESS` or `/var/run/dbus/system_bus_socket`) |
+| `user` | the calling uid's `$XDG_RUNTIME_DIR/bus` |
+| `user:UID` | `/run/user/UID/bus` |
+| `user:env:VAR` | `/run/user/$VAR/bus` -- reads VAR at start (e.g. `user:env:KASM_OS_UID`) |
+| `dbus:env-file:PATH` | reads `DBUS_SESSION_BUS_ADDRESS` from a shell-syntax env file (handles `KEY='val';` and `export KEY=val`) |
+| `unix:path=…` | any raw D-Bus address |
+
+Multiple addresses can be comma-separated in the `--systemd1-shim`
+flag; one goroutine per address dials with retry, reconnects on
+disconnect, and stands down without disrupting a real systemd if
+one is already on the bus.
+
+### What it returns
+
+- `StartTransientUnit` synthesizes a monotonic job id, emits
+  `JobNew` + `JobRemoved{result:"done"}`, returns the job's object
+  path. `systemd-run` blocks on `JobRemoved` before exec'ing its
+  target, so the signal order matters.
+- `Get(InvocationID)` on `/org/freedesktop/systemd1/unit/*` returns
+  an empty `ay` (the "no recorded invocation" sentinel) so
+  `systemd-run`'s post-StartTransientUnit query doesn't abort.
+- Everything else returns zero values or empty arrays.
+
+Callers that read property values for anything other than
+"is this thing alive" will get back zero answers -- that's the
+honest signal that this is a shim, not a unit-state store.
+
 ## Extension point -- `/etc/container-init.d/`
 
 The first-class way for layered images to add their own services or
