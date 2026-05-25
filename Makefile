@@ -21,12 +21,18 @@ build-amd64:
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
 		go build $(GOFLAGS) -tags '$(TAGS)' -ldflags '$(LDFLAGS)' \
 		-o $(BIN_DIR)/container-init.linux-amd64 ./cmd/container-init
+	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
+		go build $(GOFLAGS) -tags '$(TAGS)' -ldflags '$(LDFLAGS)' \
+		-o $(BIN_DIR)/systemd1-shim.linux-amd64 ./cmd/systemd1-shim
 
 build-arm64:
 	@mkdir -p $(BIN_DIR)
 	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
 		go build $(GOFLAGS) -tags '$(TAGS)' -ldflags '$(LDFLAGS)' \
 		-o $(BIN_DIR)/container-init.linux-arm64 ./cmd/container-init
+	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
+		go build $(GOFLAGS) -tags '$(TAGS)' -ldflags '$(LDFLAGS)' \
+		-o $(BIN_DIR)/systemd1-shim.linux-arm64 ./cmd/systemd1-shim
 
 test:
 	go test ./...
