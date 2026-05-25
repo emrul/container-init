@@ -6,14 +6,17 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"os"
+	"strings"
 
 	"github.com/emrul/container-init/internal/cgroup"
 	"github.com/emrul/container-init/internal/pid1"
 	"github.com/emrul/container-init/internal/supervisor"
+	"github.com/emrul/container-init/internal/systemd1shim"
 	"github.com/emrul/container-init/internal/trace"
 	"github.com/emrul/container-init/unit"
 )
@@ -26,6 +29,7 @@ func main() {
 	dropIn := flag.String("drop-in", "/etc/container-init.d", "directory containing image-author drop-ins (override core by name)")
 	strict := flag.Bool("strict-units", false, "fail fast on any parser warning (unknown directive / section)")
 	validate := flag.Bool("validate", false, "load + parse units, print summary, exit without supervising (build-time sanity)")
+	systemd1Shim := flag.String("systemd1-shim", "", "comma-separated D-Bus addresses to register org.freedesktop.systemd1 on (e.g. \"system,user:1000\"); empty disables")
 	versionFlag := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
@@ -96,6 +100,24 @@ func main() {
 		os.Exit(64)
 	}
 
+	// Compatibility shim for clients that probe systemd by spawning
+	// systemd-run (notably Ptyxis). Off by default; opt-in via flag.
+	// os.Exit at the bottom of main doesn't run defers, so the shim
+	// is closed explicitly after sup.Run() returns.
+	var shim *systemd1shim.Shim
+	if *systemd1Shim != "" {
+		addrs := strings.Split(*systemd1Shim, ",")
+		s, err := systemd1shim.Open(context.Background(), addrs, func(format string, args ...any) {
+			log.Printf(format, args...)
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "container-init: systemd1-shim: %v\n", err)
+		} else {
+			shim = s
+			tracer.Event("systemd1_shim_started", map[string]any{"addresses": addrs})
+		}
+	}
+
 	// SIGTERM / SIGINT → reverse shutdown.
 	go pid1.ForwardSignals(func(sig os.Signal) {
 		log.Printf("received %v, beginning reverse shutdown", sig)
@@ -105,6 +127,9 @@ func main() {
 
 	tracer.Event("supervisor_start", nil)
 	exit := sup.Run()
+	if shim != nil {
+		shim.Close()
+	}
 	close(dispatcherStop)
 	<-dispatcher.Done()
 	tracer.Event("boot_done", map[string]any{"exit": exit})
