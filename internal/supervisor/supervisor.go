@@ -342,7 +342,24 @@ func (s *Supervisor) spawnAndWait(u *unit.Unit, extra *socketact.Bound, onSpawne
 		return fmt.Errorf("unit %s: empty ExecStart", u.Name)
 	}
 	cmd := exec.Command(u.ExecStart[0], u.ExecStart[1:]...)
-	cmd.Env = append(os.Environ(), u.Environment...)
+	// Build env in systemd's documented precedence:
+	//   inherited PID 1 env  <  EnvironmentFile= (in order)  <  Environment=
+	// Last-write-wins on the resulting slice gives Environment= the
+	// final say, matching systemd-system.conf(5). Files marked
+	// IgnoreMissing (`-/path` syntax) are silently skipped when absent;
+	// any other read error fails the unit.
+	cmd.Env = os.Environ()
+	for _, ef := range u.EnvironmentFile {
+		entries, err := unit.ParseEnvironmentFile(ef.Path)
+		if err != nil {
+			if os.IsNotExist(err) && ef.IgnoreMissing {
+				continue
+			}
+			return fmt.Errorf("unit %s: env file %s: %w", u.Name, ef.Path, err)
+		}
+		cmd.Env = append(cmd.Env, entries...)
+	}
+	cmd.Env = append(cmd.Env, u.Environment...)
 	// Per-unit log tagging. exec.Cmd's internal io.Copy goroutines
 	// drain the child's stdout/stderr into these writers, which inject
 	// "[unit] " in front of every newline-terminated line. The
