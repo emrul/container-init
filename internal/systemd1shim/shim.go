@@ -151,11 +151,18 @@ func (s *Shim) dialAndServe(ctx context.Context, addr string) error {
 // resolveAddress maps user-facing forms to a real D-Bus address and,
 // when relevant, an AuthExternal option that asserts a specific UID.
 //
-//	system           -> dbus.SystemBusPrivate
-//	user             -> the calling uid's $XDG_RUNTIME_DIR/bus
-//	user:UID         -> /run/user/UID/bus, EXTERNAL auth as UID
-//	unix:path=...    -> verbatim
+//	system            -> the system bus
+//	user              -> the calling uid's $XDG_RUNTIME_DIR/bus
+//	user:UID          -> /run/user/UID/bus
+//	user:env:VAR      -> /run/user/$VAR/bus  (e.g. user:env:KASM_OS_UID)
+//	unix:path=...     -> verbatim
 //	(everything else is passed through unchanged)
+//
+// The env form exists because container-init is typically PID 1 with
+// no shell to expand variables in its argv. Kasm sets the workspace
+// uid via KASM_OS_UID at container start, so the operator passes
+// `--systemd1-shim=user:env:KASM_OS_UID` and the shim reads the var
+// itself.
 func resolveAddress(addr string) (string, []dbus.ConnOption, error) {
 	switch {
 	case addr == "system":
@@ -166,28 +173,28 @@ func resolveAddress(addr string) (string, []dbus.ConnOption, error) {
 		return sys, nil, nil
 	case addr == "user":
 		uid := os.Getuid()
-		path, err := userBusPath(uid)
-		if err != nil {
-			return "", nil, err
+		return "unix:path=" + userBusPath(uid), nil, nil
+	case strings.HasPrefix(addr, "user:env:"):
+		varName := strings.TrimPrefix(addr, "user:env:")
+		if varName == "" {
+			return "", nil, fmt.Errorf("empty env var name in %q", addr)
 		}
-		return "unix:path=" + path, nil, nil
+		val := os.Getenv(varName)
+		if val == "" {
+			return "", nil, fmt.Errorf("env var %s is unset or empty", varName)
+		}
+		uid, err := strconv.Atoi(val)
+		if err != nil || uid < 0 {
+			return "", nil, fmt.Errorf("env var %s = %q is not a valid uid", varName, val)
+		}
+		return "unix:path=" + userBusPath(uid), nil, nil
 	case strings.HasPrefix(addr, "user:"):
 		uidStr := strings.TrimPrefix(addr, "user:")
 		uid, err := strconv.Atoi(uidStr)
 		if err != nil || uid < 0 {
 			return "", nil, fmt.Errorf("invalid uid in %q", addr)
 		}
-		path, err := userBusPath(uid)
-		if err != nil {
-			return "", nil, err
-		}
-		// Auth as the bus's owning uid so the dbus-daemon's default
-		// policy (allow user="UID") matches. EXTERNAL accepts any uid
-		// the daemon can verify; on a Unix peer we're verified via
-		// SO_PEERCRED, which is the kernel-attested uid of our process.
-		// So if container-init runs as root, only AuthExternal("0")
-		// will be accepted -- we let the daemon's policy decide.
-		return "unix:path=" + path, []dbus.ConnOption{dbus.WithAuth(dbus.AuthExternal(strconv.Itoa(os.Getuid())))}, nil
+		return "unix:path=" + userBusPath(uid), nil, nil
 	default:
 		return addr, nil, nil
 	}
@@ -197,13 +204,13 @@ func resolveAddress(addr string) (string, []dbus.ConnOption, error) {
 // $XDG_RUNTIME_DIR when the request is for the calling uid (covers
 // non-standard layouts on rootless setups); fall back to /run/user/UID
 // for any other uid or when the env var is empty.
-func userBusPath(uid int) (string, error) {
+func userBusPath(uid int) string {
 	if uid == os.Getuid() {
 		if x := os.Getenv("XDG_RUNTIME_DIR"); x != "" {
-			return x + "/bus", nil
+			return x + "/bus"
 		}
 	}
-	return fmt.Sprintf("/run/user/%d/bus", uid), nil
+	return fmt.Sprintf("/run/user/%d/bus", uid)
 }
 
 func dedupe(in []string) []string {

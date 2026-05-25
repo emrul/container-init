@@ -29,7 +29,7 @@ func main() {
 	dropIn := flag.String("drop-in", "/etc/container-init.d", "directory containing image-author drop-ins (override core by name)")
 	strict := flag.Bool("strict-units", false, "fail fast on any parser warning (unknown directive / section)")
 	validate := flag.Bool("validate", false, "load + parse units, print summary, exit without supervising (build-time sanity)")
-	systemd1Shim := flag.String("systemd1-shim", "", "comma-separated D-Bus addresses to register org.freedesktop.systemd1 on (e.g. \"system,user:1000\"); empty disables")
+	systemd1Shim := flag.String("systemd1-shim", "", "comma-separated D-Bus addresses to register org.freedesktop.systemd1 on (e.g. \"user:1000\" or \"user:env:KASM_OS_UID\"); empty disables")
 	versionFlag := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 

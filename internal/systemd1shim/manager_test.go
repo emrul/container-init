@@ -134,6 +134,47 @@ func TestNoArgMethodsReturnNil(t *testing.T) {
 	}
 }
 
+func TestResolveAddressUserEnvForm(t *testing.T) {
+	t.Setenv("KASM_OS_UID", "1337")
+	addr, _, err := resolveAddress("user:env:KASM_OS_UID")
+	if err != nil {
+		t.Fatalf("resolveAddress: %v", err)
+	}
+	want := "unix:path=/run/user/1337/bus"
+	if addr != want {
+		t.Errorf("got %q want %q", addr, want)
+	}
+
+	t.Setenv("KASM_OS_UID", "")
+	if _, _, err := resolveAddress("user:env:KASM_OS_UID"); err == nil {
+		t.Error("empty env var should error")
+	}
+
+	t.Setenv("KASM_OS_UID", "not-a-number")
+	if _, _, err := resolveAddress("user:env:KASM_OS_UID"); err == nil {
+		t.Error("non-numeric env var should error")
+	}
+
+	if _, _, err := resolveAddress("user:env:"); err == nil {
+		t.Error("empty var name should error")
+	}
+}
+
+func TestResolveAddressLiteralUID(t *testing.T) {
+	addr, _, err := resolveAddress("user:1000")
+	if err != nil {
+		t.Fatalf("resolveAddress: %v", err)
+	}
+	want := "unix:path=/run/user/1000/bus"
+	if addr != want {
+		t.Errorf("got %q want %q", addr, want)
+	}
+
+	if _, _, err := resolveAddress("user:abc"); err == nil {
+		t.Error("non-numeric uid should error")
+	}
+}
+
 func TestDedupePreservesOrder(t *testing.T) {
 	got := dedupe([]string{"system", "user:1000", "system", "", "  user:1000  ", "unix:path=/x"})
 	want := []string{"system", "user:1000", "unix:path=/x"}
