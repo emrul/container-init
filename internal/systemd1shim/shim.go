@@ -118,6 +118,17 @@ func (s *Shim) dialAndServe(ctx context.Context, addr string) error {
 		"org.freedesktop.DBus.Introspectable"); err != nil {
 		return fmt.Errorf("export introspectable: %w", err)
 	}
+	// systemd-run, after StartTransientUnit succeeds, queries the
+	// unit's InvocationID via Properties.Get on
+	// /org/freedesktop/systemd1/unit/<escaped-name>. If the call
+	// errors, systemd-run logs "Failed to request invocation ID"
+	// and exits non-zero -- which Ptyxis (its caller) reports as a
+	// failed terminal. Export a properties stub on the subtree that
+	// returns zero values for the few properties real callers read.
+	if err := conn.ExportSubtree(newPropertyStub(),
+		managerPath+"/unit", "org.freedesktop.DBus.Properties"); err != nil {
+		return fmt.Errorf("export unit properties: %w", err)
+	}
 
 	reply, err := conn.RequestName(wellKnownName, dbus.NameFlagDoNotQueue)
 	if err != nil {
