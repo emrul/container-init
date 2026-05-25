@@ -1,6 +1,7 @@
 package systemd1shim
 
 import (
+	"os"
 	"sync"
 	"testing"
 
@@ -157,6 +158,37 @@ func TestResolveAddressUserEnvForm(t *testing.T) {
 
 	if _, _, err := resolveAddress("user:env:"); err == nil {
 		t.Error("empty var name should error")
+	}
+}
+
+func TestResolveAddressDBusEnvFile(t *testing.T) {
+	dir := t.TempDir()
+	p := dir + "/kasm-dbus.env"
+	// dbus-launch --sh-syntax output: KEY=VAL with trailing semicolon
+	// for each var. We tolerate that and the `export ` prefix.
+	content := `DBUS_SESSION_BUS_ADDRESS=unix:abstract=/tmp/dbus-abcdef,guid=12345;
+DBUS_SESSION_BUS_PID=4242;
+`
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	addr, _, err := resolveAddress("dbus:env-file:" + p)
+	if err != nil {
+		t.Fatalf("resolveAddress: %v", err)
+	}
+	want := "unix:abstract=/tmp/dbus-abcdef,guid=12345"
+	if addr != want {
+		t.Errorf("got %q want %q", addr, want)
+	}
+
+	if _, _, err := resolveAddress("dbus:env-file:" + dir + "/missing.env"); err == nil {
+		t.Error("missing file should error")
+	}
+
+	empty := dir + "/empty.env"
+	_ = os.WriteFile(empty, []byte("OTHER=value\n"), 0o644)
+	if _, _, err := resolveAddress("dbus:env-file:" + empty); err == nil {
+		t.Error("file without DBUS_SESSION_BUS_ADDRESS should error")
 	}
 }
 

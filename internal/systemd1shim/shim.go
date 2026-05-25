@@ -1,6 +1,7 @@
 package systemd1shim
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -151,18 +152,20 @@ func (s *Shim) dialAndServe(ctx context.Context, addr string) error {
 // resolveAddress maps user-facing forms to a real D-Bus address and,
 // when relevant, an AuthExternal option that asserts a specific UID.
 //
-//	system            -> the system bus
-//	user              -> the calling uid's $XDG_RUNTIME_DIR/bus
-//	user:UID          -> /run/user/UID/bus
-//	user:env:VAR      -> /run/user/$VAR/bus  (e.g. user:env:KASM_OS_UID)
-//	unix:path=...     -> verbatim
+//	system                   -> the system bus
+//	user                     -> the calling uid's $XDG_RUNTIME_DIR/bus
+//	user:UID                 -> /run/user/UID/bus
+//	user:env:VAR             -> /run/user/$VAR/bus  (e.g. user:env:KASM_OS_UID)
+//	dbus:env-file:PATH       -> read DBUS_SESSION_BUS_ADDRESS from PATH (sh-syntax env file)
+//	unix:path=...            -> verbatim
 //	(everything else is passed through unchanged)
 //
-// The env form exists because container-init is typically PID 1 with
-// no shell to expand variables in its argv. Kasm sets the workspace
-// uid via KASM_OS_UID at container start, so the operator passes
-// `--systemd1-shim=user:env:KASM_OS_UID` and the shim reads the var
-// itself.
+// The env-var form exists because container-init is typically PID 1
+// with no shell to expand variables in its argv. The env-file form
+// covers setups where the session bus address is published to a file
+// at start (e.g. Kasm's /tmp/kasm-dbus.env, written by dbus-launch).
+// In both cases, missing data returns an error and the outer
+// dial-retry loop tries again every dialRetry seconds.
 func resolveAddress(addr string) (string, []dbus.ConnOption, error) {
 	switch {
 	case addr == "system":
@@ -195,9 +198,56 @@ func resolveAddress(addr string) (string, []dbus.ConnOption, error) {
 			return "", nil, fmt.Errorf("invalid uid in %q", addr)
 		}
 		return "unix:path=" + userBusPath(uid), nil, nil
+	case strings.HasPrefix(addr, "dbus:env-file:"):
+		path := strings.TrimPrefix(addr, "dbus:env-file:")
+		busAddr, err := readDBusAddrFromEnvFile(path)
+		if err != nil {
+			return "", nil, err
+		}
+		return busAddr, nil, nil
 	default:
 		return addr, nil, nil
 	}
+}
+
+// readDBusAddrFromEnvFile parses a shell-style env file and returns
+// the value of DBUS_SESSION_BUS_ADDRESS. Tolerates `export ` prefixes,
+// surrounding quotes, and trailing semicolons (covers both `key=val`
+// and `export key=val;` shapes -- dbus-launch's --sh-syntax output is
+// the latter).
+func readDBusAddrFromEnvFile(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("env file %s: %w", path, err)
+	}
+	defer f.Close()
+	const key = "DBUS_SESSION_BUS_ADDRESS"
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimPrefix(line, "export ")
+		eq := strings.IndexByte(line, '=')
+		if eq < 0 {
+			continue
+		}
+		if strings.TrimSpace(line[:eq]) != key {
+			continue
+		}
+		val := strings.TrimSpace(line[eq+1:])
+		val = strings.TrimSuffix(val, ";")
+		val = strings.Trim(val, `"'`)
+		if val == "" {
+			return "", fmt.Errorf("env file %s: %s is empty", path, key)
+		}
+		return val, nil
+	}
+	if err := sc.Err(); err != nil {
+		return "", fmt.Errorf("env file %s: %w", path, err)
+	}
+	return "", fmt.Errorf("env file %s: %s not found", path, key)
 }
 
 // userBusPath returns the conventional per-uid user bus path. Prefer
