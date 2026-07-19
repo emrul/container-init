@@ -2,7 +2,7 @@ module github.com/emrul/container-init
 
 go 1.23
 
-toolchain go1.24.4
+toolchain go1.26.5
 
 require (
 	github.com/coreos/go-systemd/v22 v22.7.0
