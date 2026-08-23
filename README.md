@@ -224,6 +224,12 @@ file + section + directive (default) or fail-fast (`--strict-units`).
 
 Drop-ins participate in the supervisor's full lifecycle:
 
+- **After= / Requires= / Before=** -- start ordering. `Before=X` is
+  folded into `X`'s `After=` when units are loaded, so it orders the
+  boot sequence *and* blocks the target at run time, and it composes
+  with an `After=` the target declares itself. Ordering a drop-in ahead
+  of a core unit -- the usual reason to reach for it -- therefore needs
+  no override of that core unit.
 - **Restart= / RestartSec= / StartLimitBurst= / StartLimitIntervalSec=** --
   per-unit restart policy and rate limiting.
 - **ConditionPathExists= / ConditionPathExistsGlob= / ConditionEnvironment=** --

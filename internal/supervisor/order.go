@@ -6,8 +6,52 @@ import (
 	"github.com/emrul/container-init/unit"
 )
 
+// resolveBefore rewrites every "u Before= X" into the equivalent
+// "X After= u", in place, and must run before topoSort.
+//
+// Doing it as a rewrite rather than as extra edges inside topoSort is
+// deliberate. topoSort fixes only the order of the start *list*; what actually
+// blocks a unit at run time is waitDeps, which reads After= and Requires=.
+// Teaching topoSort about Before= on its own would produce ordering that looks
+// right in the boot trace and still races in practice -- strictly worse than
+// not supporting the directive, because it would look supported.
+//
+// Before this existed, Before= parsed into the unit struct and was read
+// nowhere: accepted by --strict-units (it is a known directive, so no
+// unknown-directive warning), silently no-ordering at run time.
+//
+// A Before= naming a unit that is not loaded is ignored, matching how
+// topoSort and waitDeps already treat unknown names.
+func resolveBefore(units []*unit.Unit) {
+	byName := make(map[string]*unit.Unit, len(units))
+	for _, u := range units {
+		byName[u.Name] = u
+	}
+	for _, u := range units {
+		for _, name := range u.Before {
+			target, ok := byName[name]
+			if !ok || target == u {
+				continue
+			}
+			already := false
+			for _, dep := range target.After {
+				if dep == u.Name {
+					already = true
+					break
+				}
+			}
+			if !already {
+				target.After = append(target.After, u.Name)
+			}
+		}
+	}
+}
+
 // topoSort returns units in start order: dependencies before dependents.
 // After= and Requires= both contribute edges. Cycles are reported.
+//
+// Before= does not contribute edges here: resolveBefore has already folded it
+// into the target's After=.
 func topoSort(units []*unit.Unit) ([]*unit.Unit, error) {
 	byName := make(map[string]*unit.Unit, len(units))
 	for _, u := range units {
