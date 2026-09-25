@@ -1,0 +1,25 @@
+# Version + security updates for Go modules and the Actions used in
+# workflows. Dependabot does not track the Go toolchain / stdlib, so
+# toolchain.yml covers that side. Merging any of these PRs cuts a patch
+# release via auto-release.yml.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      gomod:
+        patterns: ["*"]
+    commit-message:
+      prefix: "build(deps)"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci(deps)"

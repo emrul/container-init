@@ -1,0 +1,47 @@
+name: Auto release
+
+# After CI passes on main, cut a patch release if go.mod/go.sum changed
+# since the last tag -- i.e. a Dependabot or toolchain PR was merged.
+# Tags pushed with GITHUB_TOKEN don't trigger other workflows, so the
+# release workflow is called directly rather than via the tag push.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.next.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      - id: next
+        run: |
+          last=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null) || { echo "no previous tag"; exit 0; }
+          if git tag --points-at HEAD | grep -q '^v'; then echo "HEAD already tagged"; exit 0; fi
+          if git diff --quiet "$last" HEAD -- go.mod go.sum; then echo "no dependency change since $last"; exit 0; fi
+          IFS=. read -r major minor patch <<< "${last#v}"
+          next="v$major.$minor.$((patch + 1))"
+          git tag "$next"
+          git push origin "$next"
+          echo "tag=$next" >> "$GITHUB_OUTPUT"
+
+  release:
+    needs: tag
+    if: needs.tag.outputs.tag != ''
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.tag.outputs.tag }}
+    permissions:
+      contents: write
