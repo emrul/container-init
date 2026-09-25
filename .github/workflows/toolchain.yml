@@ -19,7 +19,7 @@ jobs:
   bump:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Compare pinned toolchain with latest Go release
         id: ver
@@ -31,7 +31,7 @@ jobs:
           if [ "$latest" != "$current" ]; then echo "bump=true" >> "$GITHUB_OUTPUT"; fi
 
       - if: steps.ver.outputs.bump == 'true'
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: ${{ steps.ver.outputs.latest }}
 
@@ -62,8 +62,8 @@ jobs:
   govulncheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
