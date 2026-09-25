@@ -1,15 +1,15 @@
 module github.com/emrul/container-init
 
-go 1.23
+go 1.26.0
 
-toolchain go1.26.5
+toolchain go1.27.1
 
 require (
 	github.com/coreos/go-systemd/v22 v22.7.0
 	github.com/godbus/dbus/v5 v5.2.2
 )
 
-require golang.org/x/sys v0.27.0 // indirect
+require golang.org/x/sys v0.48.0 // indirect
 
 // In-tree patched godbus. The patch in third_party/godbus/decoder.go
 // fixes a reflect.Append type-mismatch panic that hits any time a
