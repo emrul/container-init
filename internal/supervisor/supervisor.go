@@ -359,25 +359,15 @@ func (s *Supervisor) runService(u *unit.Unit) {
 			s.signalReady(u.Name)
 		}
 
-		if failed {
-			for _, target := range u.OnFailure {
-				go s.fireOnFailure(target)
-			}
-		}
 		if failed && u.ExitContainerOnFailure {
+			s.unitFailed(u, exitErr)
 			log.Printf("unit %s: ExitContainerOnFailure -- initiating reverse shutdown", u.Name)
 			s.Stop()
 			return
 		}
 		if !shouldRestart(u, failed) {
-			// Giving up. A unit that never became ready (a oneshot
-			// that exited non-zero, or any unit that could not be
-			// started) settles as failed so its dependents are
-			// released or failed rather than waiting forever.
-			// A start failure has already logged its cause.
-			var se *startError
-			if failed && s.markFailed(u.Name) && !errors.As(exitErr, &se) {
-				log.Printf("unit %s: failed: %v", u.Name, exitErr)
+			if failed {
+				s.unitFailed(u, exitErr)
 			}
 			return
 		}
@@ -388,6 +378,26 @@ func (s *Supervisor) runService(u *unit.Unit) {
 				return
 			}
 		}
+	}
+}
+
+// unitFailed handles a unit that failed and will not be started
+// again -- its Restart= policy gave up, or ExitContainerOnFailure= is
+// taking the container down. As in systemd, this is when OnFailure=
+// fires: once the unit is failed, not on each failure it restarts
+// from. A unit that never became ready (a oneshot that exited
+// non-zero, or any unit that could not be started) settles as failed
+// so its dependents are released or failed rather than waiting
+// forever.
+func (s *Supervisor) unitFailed(u *unit.Unit, err error) {
+	s.markFailed(u.Name)
+	// A start failure has already logged its cause.
+	var se *startError
+	if !errors.As(err, &se) {
+		log.Printf("unit %s: failed: %v", u.Name, err)
+	}
+	for _, target := range u.OnFailure {
+		go s.fireOnFailure(target)
 	}
 }
 
@@ -646,10 +656,14 @@ func (s *Supervisor) driveNative(sock *unit.Unit, bound *socketact.Bound) {
 		failed := exitErr != nil
 		s.event(svc.Name, "exited", map[string]any{"failed": failed, "err": errString(exitErr)})
 		if failed && svc.ExitContainerOnFailure {
+			s.unitFailed(svc, exitErr)
 			s.Stop()
 			return
 		}
 		if !shouldRestart(svc, failed) {
+			if failed {
+				s.unitFailed(svc, exitErr)
+			}
 			return
 		}
 		if svc.RestartSec > 0 {
@@ -740,10 +754,14 @@ func (s *Supervisor) runHelperLoop(svc *unit.Unit, helperUp chan struct{}) {
 		failed := exitErr != nil
 		s.event(svc.Name, "exited", map[string]any{"failed": failed, "err": errString(exitErr)})
 		if failed && svc.ExitContainerOnFailure {
+			s.unitFailed(svc, exitErr)
 			s.Stop()
 			return
 		}
 		if !shouldRestart(svc, failed) {
+			if failed {
+				s.unitFailed(svc, exitErr)
+			}
 			return
 		}
 		if svc.RestartSec > 0 {

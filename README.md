@@ -258,12 +258,16 @@ Drop-ins participate in the supervisor's full lifecycle:
   entry. systemd's `@system` is not supported.
   A `.socket` whose service is skipped is skipped with it and does not
   listen, so a client cannot start a service its conditions ruled out.
-- **OnFailure=** -- invoke a sibling oneshot when this unit's restart
-  policy is exhausted; chains across the core/drop-in boundary
-  identically.
+- **OnFailure=** -- invoke a sibling oneshot when this unit fails for
+  good: it failed and `Restart=` will not start it again, or it hit its
+  start limit. A failure the unit restarts from does not fire it, as in
+  systemd -- so under `Restart=always` / `Restart=on-failure` it fires
+  only once a start limit runs out. Chains across the core/drop-in
+  boundary identically.
 - **ExitContainerOnFailure=true** -- fail-secure: take the whole
-  container down via reverse shutdown when this unit's failure path
-  is reached. Useful for compliance gates an image author owns.
+  container down via reverse shutdown on this unit's first failure,
+  even one `Restart=` would have recovered from; `OnFailure=` fires on
+  the way down. Useful for compliance gates an image author owns.
 - **User= / Group= / WorkingDirectory=** -- privilege drop. Accepts
   the `${VAR:-default}` env-expansion form so per-image overrides
   flow through automatically.

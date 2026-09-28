@@ -270,65 +270,158 @@ func TestStartLimitFailsUnit(t *testing.T) {
 	}
 }
 
+// countingScript returns a shell command that increments the counter in
+// f, then runs tail.
+func countingScript(f, tail string) string {
+	return fmt.Sprintf(`n=0; [ -f '%[1]s' ] && n=$(cat '%[1]s'); printf '%%d' $((n+1)) > '%[1]s'; %[2]s`, f, tail)
+}
+
+func readCount(f string) int {
+	data, _ := os.ReadFile(f)
+	n, _ := strconv.Atoi(strings.TrimSpace(string(data)))
+	return n
+}
+
+// runUnits starts a supervisor over us and stops it at test end.
+func runUnits(t *testing.T, us ...*unit.Unit) *Supervisor {
+	t.Helper()
+	d := pid1.NewDispatcher()
+	dispStop := make(chan struct{})
+	d.Start(dispStop)
+	sup, err := New(us, nil, d, &cgroup.Manager{})
+	if err != nil {
+		close(dispStop)
+		t.Fatalf("New: %v", err)
+	}
+	runDone := make(chan struct{})
+	go func() { sup.Run(); close(runDone) }()
+	t.Cleanup(func() {
+		sup.Stop()
+		<-runDone
+		close(dispStop)
+	})
+	return sup
+}
+
+// waitCount waits until f counts at least n, then a little longer so
+// anything that should not happen has time to.
+func waitCount(t *testing.T, f string, n int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for readCount(f) < n && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(200 * time.Millisecond)
+}
+
+// TestOnFailureFiresOnceWhenUnitGivesUp: OnFailure= fires when the
+// unit is failed for good, not on each failure it restarts from.
+func TestOnFailureFiresOnceWhenUnitGivesUp(t *testing.T) {
+	cases := []struct {
+		name    string
+		restart unit.RestartPolicy
+		burst   int
+		runs    int
+	}{
+		{"Restart=no", unit.RestartNo, 0, 1},
+		{"Restart=on-failure until start limit", unit.RestartOnFailure, 3, 3},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			failCount := filepath.Join(dir, "fail")
+			handlerCount := filepath.Join(dir, "handler")
+			failing := &unit.Unit{
+				Name:                  "failing.service",
+				Kind:                  unit.KindService,
+				Type:                  unit.TypeSimple,
+				ExecStart:             []string{"/bin/sh", "-c", countingScript(failCount, "exit 1")},
+				Restart:               tc.restart,
+				RestartSec:            10 * time.Millisecond,
+				StartLimitBurst:       tc.burst,
+				StartLimitIntervalSec: time.Minute,
+				OnFailure:             []string{"handler.service"},
+			}
+			handler := &unit.Unit{
+				Name:      "handler.service",
+				Kind:      unit.KindService,
+				Type:      unit.TypeOneshot,
+				ExecStart: []string{"/bin/sh", "-c", countingScript(handlerCount, "exit 0")},
+			}
+			runUnits(t, failing, handler)
+			waitCount(t, failCount, tc.runs)
+			if n := readCount(failCount); n != tc.runs {
+				t.Errorf("failing.service ran %d time(s), want %d", n, tc.runs)
+			}
+			if n := readCount(handlerCount); n != 1 {
+				t.Errorf("handler.service ran %d time(s), want 1", n)
+			}
+		})
+	}
+}
+
+// TestOnFailureNotFiredWhileRestarting: a unit that fails and is
+// restarted into success never reaches the failed state.
+func TestOnFailureNotFiredWhileRestarting(t *testing.T) {
+	dir := t.TempDir()
+	runCount := filepath.Join(dir, "runs")
+	handlerCount := filepath.Join(dir, "handler")
+	flaky := &unit.Unit{
+		Name:       "flaky.service",
+		Kind:       unit.KindService,
+		Type:       unit.TypeOneshot,
+		ExecStart:  []string{"/bin/sh", "-c", countingScript(runCount, `[ "$n" -ge 1 ]`)}, // fails once
+		Restart:    unit.RestartOnFailure,
+		RestartSec: 10 * time.Millisecond,
+		OnFailure:  []string{"handler.service"},
+	}
+	handler := &unit.Unit{
+		Name:      "handler.service",
+		Kind:      unit.KindService,
+		Type:      unit.TypeOneshot,
+		ExecStart: []string{"/bin/sh", "-c", countingScript(handlerCount, "exit 0")},
+	}
+	sup := runUnits(t, flaky, handler)
+	select {
+	case <-sup.ready["flaky.service"]:
+	case <-time.After(5 * time.Second):
+		t.Fatal("flaky.service never became ready")
+	}
+	time.Sleep(200 * time.Millisecond)
+	if n := readCount(runCount); n != 2 {
+		t.Errorf("flaky.service ran %d time(s), want 2", n)
+	}
+	if n := readCount(handlerCount); n != 0 {
+		t.Errorf("handler.service ran %d time(s), want 0", n)
+	}
+}
+
 // TestStartLimitCoversOnFailure: an OnFailure= target is started
-// through the same start limit as any other unit.
+// through the same start limit as any other unit, so two failing units
+// sharing one handler with StartLimitBurst=1 run it once.
 func TestStartLimitCoversOnFailure(t *testing.T) {
 	dir := t.TempDir()
-	failCount := filepath.Join(dir, "fail")
 	handlerCount := filepath.Join(dir, "handler")
-	counter := func(f, tail string) string {
-		return fmt.Sprintf(`n=0; [ -f '%[1]s' ] && n=$(cat '%[1]s'); printf '%%d' $((n+1)) > '%[1]s'; %[2]s`, f, tail)
-	}
-	failing := &unit.Unit{
-		Name:                  "failing.service",
-		Kind:                  unit.KindService,
-		Type:                  unit.TypeSimple,
-		ExecStart:             []string{"/bin/sh", "-c", counter(failCount, "exit 1")},
-		Restart:               unit.RestartOnFailure,
-		RestartSec:            10 * time.Millisecond,
-		StartLimitBurst:       3,
-		StartLimitIntervalSec: time.Minute,
-		OnFailure:             []string{"handler.service"},
+	failing := func(name string) *unit.Unit {
+		return &unit.Unit{
+			Name:      name,
+			Kind:      unit.KindService,
+			Type:      unit.TypeSimple,
+			ExecStart: []string{"/bin/sh", "-c", "exit 1"},
+			OnFailure: []string{"handler.service"},
+		}
 	}
 	handler := &unit.Unit{
 		Name:                  "handler.service",
 		Kind:                  unit.KindService,
 		Type:                  unit.TypeOneshot,
-		ExecStart:             []string{"/bin/sh", "-c", counter(handlerCount, "exit 0")},
+		ExecStart:             []string{"/bin/sh", "-c", countingScript(handlerCount, "exit 0")},
 		StartLimitBurst:       1,
 		StartLimitIntervalSec: time.Minute,
 	}
-
-	d := pid1.NewDispatcher()
-	dispStop := make(chan struct{})
-	defer close(dispStop)
-	d.Start(dispStop)
-
-	sup, err := New([]*unit.Unit{failing, handler}, nil, d, &cgroup.Manager{})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	runDone := make(chan struct{})
-	go func() { sup.Run(); close(runDone) }()
-	defer func() {
-		sup.Stop()
-		<-runDone
-	}()
-
-	count := func(f string) int {
-		data, _ := os.ReadFile(f)
-		n, _ := strconv.Atoi(strings.TrimSpace(string(data)))
-		return n
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	for count(failCount) < 3 && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-	time.Sleep(200 * time.Millisecond) // let every OnFailure= invocation land
-	if n := count(failCount); n != 3 {
-		t.Errorf("failing.service ran %d time(s), want 3", n)
-	}
-	if n := count(handlerCount); n != 1 {
+	runUnits(t, failing("a.service"), failing("b.service"), handler)
+	waitCount(t, handlerCount, 1)
+	if n := readCount(handlerCount); n != 1 {
 		t.Errorf("handler.service ran %d time(s), want 1 (StartLimitBurst=1)", n)
 	}
 }
@@ -380,22 +473,7 @@ func TestOnFailureCycleWithSpentLimits(t *testing.T) {
 	b := failing("b.service", "a.service", 1)
 	c := failing("c.service", "b.service", 0)
 	c.Type = unit.TypeSimple
-
-	d := pid1.NewDispatcher()
-	dispStop := make(chan struct{})
-	defer close(dispStop)
-	d.Start(dispStop)
-
-	sup, err := New([]*unit.Unit{a, b, c}, nil, d, &cgroup.Manager{})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	runDone := make(chan struct{})
-	go func() { sup.Run(); close(runDone) }()
-	defer func() {
-		sup.Stop()
-		<-runDone
-	}()
+	runUnits(t, a, b, c)
 
 	time.Sleep(300 * time.Millisecond)
 	if n := strings.Count(logs.String(), "start limit hit"); n != 1 {
