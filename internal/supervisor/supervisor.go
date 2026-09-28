@@ -13,6 +13,7 @@ package supervisor
 import (
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -25,6 +26,7 @@ import (
 	"time"
 
 	"github.com/emrul/container-init/internal/cgroup"
+	"github.com/emrul/container-init/internal/execwrap"
 	"github.com/emrul/container-init/internal/pid1"
 	"github.com/emrul/container-init/internal/socketact"
 	"github.com/emrul/container-init/internal/trace"
@@ -66,6 +68,11 @@ type Supervisor struct {
 	// cgroupAfterSpawn is set once clone3(CLONE_INTO_CGROUP) has been
 	// refused; spawns then move the child into its cgroup afterwards.
 	cgroupAfterSpawn atomic.Bool
+	// wrapper is the program every spawn execs first (see execwrap):
+	// container-init's own binary, which then chdirs and execs the
+	// service. A field so tests can substitute a copy other users can
+	// execute.
+	wrapper string
 }
 
 type serviceState struct {
@@ -123,6 +130,7 @@ func New(units []*unit.Unit, tracer *trace.Tracer, dispatcher *pid1.Dispatcher, 
 		ready:      ready,
 		failed:     make(map[string]bool),
 		limits:     limits,
+		wrapper:    "/proc/self/exe",
 	}, nil
 }
 
@@ -468,10 +476,9 @@ func (s *Supervisor) fireOnFailure(name string) {
 // spawnAndWait runs u's ExecStart once. If extra is non-nil, the
 // service is socket-activated in native mode and the listening fd is
 // passed via socketact.PrepareNative. onSpawned (if non-nil) fires
-// after dispatcher.Spawn returns and the cgroup placement has run --
-// callers use this to mark Type=simple/forking services ready as
-// soon as the fork-exec succeeds, without waiting for the long-running
-// process to exit.
+// once the service's ExecStart has been exec'd -- callers use this to
+// mark Type=simple/forking services ready as soon as the fork-exec
+// succeeds, without waiting for the long-running process to exit.
 func (s *Supervisor) spawnAndWait(u *unit.Unit, extra *socketact.Bound, onSpawned func()) error {
 	if len(u.ExecStart) == 0 {
 		return s.startFailed(u, fmt.Errorf("empty ExecStart"))
@@ -539,6 +546,25 @@ func (s *Supervisor) spawnAndWait(u *unit.Unit, extra *socketact.Bound, onSpawne
 		}
 	}
 
+	// Exec the wrapper rather than the service (see execwrap): nothing
+	// between fork and exec may touch a path outside PID 1's control,
+	// because the dispatcher lock is held until the exec. The wrapper
+	// starts in "/" and does the chdir and the service's execve itself.
+	if cmd.Err != nil {
+		return s.startFailed(u, cmd.Err) // ExecStart name not found in $PATH
+	}
+	statusR, statusW, err := os.Pipe()
+	if err != nil {
+		return s.startFailed(u, fmt.Errorf("status pipe: %w", err))
+	}
+	defer statusR.Close()
+	defer statusW.Close() // closed early below; this covers the error returns
+	cmd.ExtraFiles = append(cmd.ExtraFiles, statusW)
+	statusFD := 3 + len(cmd.ExtraFiles) - 1
+	cmd.Args = execwrap.Argv(statusFD, cmd.Dir, cmd.Path, cmd.Args)
+	cmd.Path = s.wrapper
+	cmd.Dir = "/"
+
 	// Create the per-unit cgroup and start the child inside it, so a
 	// service that forks at once cannot leave children outside it (and
 	// beyond cgroup.kill). Mkdir is idempotent across restarts.
@@ -572,10 +598,18 @@ func (s *Supervisor) spawnAndWait(u *unit.Unit, extra *socketact.Bound, onSpawne
 		placed = false
 		pid, exitCh, err = s.dispatcher.Spawn(cmd)
 	}
+	// The child holds its own copy of the write end; ours must go so
+	// the read below sees EOF when the service execs.
+	statusW.Close()
 	if err != nil {
 		invokePhase.EndStatus("error", map[string]any{"unit": u.Name, "err": err.Error()})
 		return s.startFailed(u, err)
 	}
+	status := make(chan string, 1)
+	go func() {
+		b, _ := io.ReadAll(statusR)
+		status <- string(b)
+	}()
 	invokePhase.End(map[string]any{"unit": u.Name, "pid": pid})
 	if label := trace.PostSpawnLabel(s.postLabels, u.Name); label != "" {
 		s.tracer.MemSnapshot(label)
@@ -601,6 +635,22 @@ func (s *Supervisor) spawnAndWait(u *unit.Unit, extra *socketact.Bound, onSpawne
 	s.services[u.Name] = state
 	s.mu.Unlock()
 
+	// Wait for the wrapper to exec the service (EOF on the status pipe)
+	// or to report why it could not. This can take as long as a hung
+	// WorkingDirectory= mount, but only this unit waits: the dispatcher
+	// lock is long gone. Stop still reaches it through the pid.
+	var msg string
+	select {
+	case msg = <-status:
+	case <-s.stopCh:
+		_ = syscall.Kill(pid, syscall.SIGTERM)
+		msg = <-status
+	}
+	if msg != "" {
+		s.finish(u, state, <-exitCh)
+		return s.startFailed(u, errors.New(msg))
+	}
+
 	if onSpawned != nil {
 		onSpawned()
 	}
@@ -614,7 +664,12 @@ func (s *Supervisor) spawnAndWait(u *unit.Unit, extra *socketact.Bound, onSpawne
 		es = <-exitCh
 	case es = <-exitCh:
 	}
+	return s.finish(u, state, es)
+}
 
+// finish records that u's process has exited with es, sweeps anything
+// it left behind, and returns the exit as an error (nil for success).
+func (s *Supervisor) finish(u *unit.Unit, state *serviceState, es pid1.ExitStatus) error {
 	exitErr := es.AnyError()
 	s.mu.Lock()
 	state.exited = true
@@ -629,7 +684,7 @@ func (s *Supervisor) spawnAndWait(u *unit.Unit, extra *socketact.Bound, onSpawne
 	if s.cgroup.Available() {
 		_ = s.cgroup.Kill(u.Name)
 	} else {
-		_ = killGroup(pid, syscall.SIGTERM)
+		_ = killGroup(state.pid, syscall.SIGTERM)
 	}
 	return exitErr
 }

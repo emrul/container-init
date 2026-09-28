@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/emrul/container-init/internal/cgroup"
+	"github.com/emrul/container-init/internal/execwrap"
 	"github.com/emrul/container-init/internal/pid1"
 	"github.com/emrul/container-init/internal/supervisor"
 	"github.com/emrul/container-init/internal/systemd1shim"
@@ -25,6 +26,10 @@ import (
 var version = "dev"
 
 func main() {
+	// A service spawn re-executes this binary as its first step; that
+	// never returns. See execwrap.
+	execwrap.Main()
+
 	dir := flag.String("units", "/etc/container-init/units", "directory containing core .service / .socket files")
 	dropIn := flag.String("drop-in", "/etc/container-init.d", "directory containing image-author drop-ins (override core by name)")
 	strict := flag.Bool("strict-units", false, "fail fast on any parser warning (unknown directive / section)")

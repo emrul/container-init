@@ -292,6 +292,13 @@ Drop-ins participate in the supervisor's full lifecycle:
   entry gets gid 0 unless `Group=` is set, so under a non-root
   container-init such a unit needs an explicit `Group=` to match.
 
+  Every service starts by re-executing the container-init binary as
+  the unit's user, which then enters `WorkingDirectory=` and execs
+  `ExecStart=` -- so the binary must be executable by every `User=`
+  (mode `0755`, as installed normally). This keeps a slow or hung
+  `WorkingDirectory=` or `ExecStart=` path from stalling PID 1: it
+  only delays that one unit.
+
   `User=` / `Group=` names resolve against `/etc/passwd` and
   `/etc/group`, read directly (the binary is static and never uses
   NSS). Set `CONTAINER_INIT_PASSWD_FILE` / `CONTAINER_INIT_GROUP_FILE`
