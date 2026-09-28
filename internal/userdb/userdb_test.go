@@ -143,3 +143,38 @@ func TestSupplementaryGroupsExcludesPrimary(t *testing.T) {
 		t.Errorf("supplementary = %v, want [29]", got.SupplementaryGroups)
 	}
 }
+
+func TestResolveEnvFileOverride(t *testing.T) {
+	withFakeFiles(t, samplePasswd, sampleGroup)
+	// A renamed user exists only in the generated files the
+	// environment points at, as nss_wrapper would see them.
+	dir := t.TempDir()
+	pp := filepath.Join(dir, "passwd")
+	gp := filepath.Join(dir, "group")
+	if err := os.WriteFile(pp, []byte("renamed:x:1000:1000::/home/renamed:/bin/bash\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(gp, []byte("renamed:x:1000:\naudio:x:29:renamed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(PasswdFileEnv, pp)
+	t.Setenv(GroupFileEnv, gp)
+
+	got, err := Resolve("renamed", "", "")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	want := Identity{
+		Username:            "renamed",
+		UID:                 1000,
+		GID:                 1000,
+		Home:                "/home/renamed",
+		SupplementaryGroups: []uint32{29},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %#v, want %#v", got, want)
+	}
+	if _, err := Resolve("app-user", "", ""); err == nil {
+		t.Error("app-user resolved from the default file despite the override")
+	}
+}

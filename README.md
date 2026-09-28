@@ -261,6 +261,14 @@ Drop-ins participate in the supervisor's full lifecycle:
   entry gets gid 0 unless `Group=` is set, so under a non-root
   container-init such a unit needs an explicit `Group=` to match.
 
+  `User=` / `Group=` names resolve against `/etc/passwd` and
+  `/etc/group`, read directly (the binary is static and never uses
+  NSS). Set `CONTAINER_INIT_PASSWD_FILE` / `CONTAINER_INIT_GROUP_FILE`
+  to read other files instead -- for example the files an
+  `nss_wrapper` setup generates to rename the user of a non-root
+  container. They are read at each unit start, so a unit can generate
+  them for the units after it.
+
 ## Worked examples
 
 ### 1. One-shot at boot

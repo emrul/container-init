@@ -205,6 +205,11 @@ func (s *Supervisor) Run() int {
 	if s.euid != 0 {
 		log.Printf("running as uid %d gid %d, not root: User= units must resolve to this identity; switching is off", s.euid, s.egid)
 	}
+	for _, env := range []string{userdb.PasswdFileEnv, userdb.GroupFileEnv} {
+		if v := os.Getenv(env); v != "" {
+			log.Printf("%s=%s: User= / Group= resolve against it", env, v)
+		}
+	}
 
 	// Pass 1: bind every .socket whose conditions allow. Skipped
 	// sockets (and their attached services) immediately signal ready
