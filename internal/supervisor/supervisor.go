@@ -64,6 +64,10 @@ type Supervisor struct {
 	// limits holds each unit's start-limit state, shared by every path
 	// that starts it; see allowStart.
 	limits map[string]*startLimiter
+	// missingReq records, for each unit whose Requires= chain reaches a
+	// unit that is not loaded, the first such name and the unit that
+	// requires it. Fixed at New; see missingRequirements.
+	missingReq map[string]missingRequirement
 	// cgroupProbe decides, once, whether children can be spawned
 	// straight into their cgroup; see canSpawnIntoCgroup.
 	cgroupProbe       sync.Once
@@ -130,6 +134,7 @@ func New(units []*unit.Unit, tracer *trace.Tracer, dispatcher *pid1.Dispatcher, 
 		ready:      ready,
 		failed:     make(map[string]bool),
 		limits:     limits,
+		missingReq: missingRequirements(byName),
 		wrapper:    "/proc/self/exe",
 	}, nil
 }
@@ -184,15 +189,13 @@ func (s *Supervisor) settle(name string, failed bool) bool {
 // systemd's rule too. ok=false with an empty failedDep means the
 // supervisor stopped first.
 //
-// A Requires= naming a unit that is not loaded fails at once, whatever
-// the ordering: systemd cannot build the start job and does not start
-// the unit ("Unit X not found"). Missing After= / Wants= names are
-// ignored, as in systemd.
+// A Requires= chain that reaches a unit that is not loaded fails at
+// once, whatever the ordering: systemd cannot build the start
+// transaction and does not start the unit ("Unit X not found"). Missing
+// After= / Wants= names are ignored, as in systemd.
 func (s *Supervisor) waitDeps(u *unit.Unit) (failedDep string, ok bool) {
-	for _, name := range u.Requires {
-		if _, known := s.byName[name]; !known {
-			return name, false
-		}
+	if m, ok := s.missingReq[u.Name]; ok {
+		return m.name, false
 	}
 	for _, name := range u.After {
 		s.mu.Lock()
@@ -232,9 +235,50 @@ func (s *Supervisor) logDependencyFailed(u *unit.Unit, dep string) {
 	reason := "failed"
 	if _, known := s.byName[dep]; !known {
 		reason = "not found"
+		if m := s.missingReq[u.Name]; m.name == dep && m.via != u.Name {
+			reason += " (required by " + m.via + ")"
+		}
 	}
 	log.Printf("unit %s: not started: required unit %s %s", u.Name, dep, reason)
 	s.event(u.Name, "dependency_failed", map[string]any{"dependency": dep, "reason": reason})
+}
+
+type missingRequirement struct {
+	name string // the unit that is not loaded
+	via  string // the unit whose Requires= names it
+}
+
+// missingRequirements walks each unit's Requires= closure and records
+// the first name in it that is not loaded. systemd builds the whole
+// transaction before starting anything, so "A Requires=B" with
+// "B Requires=gone" does not start A either, with or without ordering.
+// Each unit gets its own breadth-first walk with a visited set, which
+// handles Requires= cycles; memoising across units would not, since a
+// result recorded part-way round a cycle can miss what the rest of the
+// cycle requires.
+func missingRequirements(byName map[string]*unit.Unit) map[string]missingRequirement {
+	out := make(map[string]missingRequirement)
+	for name := range byName {
+		seen := map[string]bool{name: true}
+		queue := []string{name}
+	walk:
+		for len(queue) > 0 {
+			cur := byName[queue[0]]
+			queue = queue[1:]
+			for _, req := range cur.Requires {
+				if seen[req] {
+					continue
+				}
+				seen[req] = true
+				if _, ok := byName[req]; !ok {
+					out[name] = missingRequirement{name: req, via: cur.Name}
+					break walk
+				}
+				queue = append(queue, req)
+			}
+		}
+	}
+	return out
 }
 
 // Run starts every non-skipped unit and blocks until Stop is invoked

@@ -127,3 +127,76 @@ func TestWaitDepsMissingRequirement(t *testing.T) {
 		})
 	}
 }
+
+// A missing unit anywhere in the Requires= chain stops the unit, with
+// no ordering involved, and Requires= cycles neither loop nor hide it.
+func TestMissingRequirementAnywhereInChain(t *testing.T) {
+	req := func(name string, reqs ...string) *unit.Unit {
+		return &unit.Unit{Name: name, Requires: reqs}
+	}
+	cases := []struct {
+		name  string
+		units []*unit.Unit
+		want  map[string]missingRequirement // units expected to fail
+	}{
+		{
+			name:  "two levels",
+			units: []*unit.Unit{req("a.service", "b.service"), req("b.service", "gone.service")},
+			want: map[string]missingRequirement{
+				"a.service": {"gone.service", "b.service"},
+				"b.service": {"gone.service", "b.service"},
+			},
+		},
+		{
+			name: "three levels",
+			units: []*unit.Unit{
+				req("a.service", "b.service"), req("b.service", "c.service"), req("c.service", "gone.service"),
+			},
+			want: map[string]missingRequirement{
+				"a.service": {"gone.service", "c.service"},
+				"b.service": {"gone.service", "c.service"},
+				"c.service": {"gone.service", "c.service"},
+			},
+		},
+		{
+			name: "cycle reaching a missing unit",
+			units: []*unit.Unit{
+				req("a.service", "b.service", "gone.service"), req("b.service", "a.service"),
+			},
+			want: map[string]missingRequirement{
+				"a.service": {"gone.service", "a.service"},
+				"b.service": {"gone.service", "a.service"},
+			},
+		},
+		{
+			name:  "cycle with nothing missing",
+			units: []*unit.Unit{req("a.service", "b.service"), req("b.service", "a.service")},
+			want:  map[string]missingRequirement{},
+		},
+		{
+			name: "missing only behind Wants=",
+			units: []*unit.Unit{
+				req("a.service", "b.service"), {Name: "b.service", Wants: []string{"gone.service"}},
+			},
+			want: map[string]missingRequirement{},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newDepsSupervisor(t, tc.units...)
+			for _, u := range tc.units {
+				failedDep, ok := s.waitDeps(u)
+				want, shouldFail := tc.want[u.Name]
+				if ok == shouldFail {
+					t.Errorf("%s: waitDeps = (%q, %v), want ok=%v", u.Name, failedDep, ok, !shouldFail)
+					continue
+				}
+				if shouldFail {
+					if got := s.missingReq[u.Name]; got != want {
+						t.Errorf("%s: missing = %+v, want %+v", u.Name, got, want)
+					}
+				}
+			}
+		})
+	}
+}

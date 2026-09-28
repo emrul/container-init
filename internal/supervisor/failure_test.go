@@ -489,6 +489,7 @@ func TestMissingRequirementNotStarted(t *testing.T) {
 	orphanMark := filepath.Join(dir, "orphan")
 	chainedMark := filepath.Join(dir, "chained")
 	orderedMark := filepath.Join(dir, "ordered")
+	indirectMark := filepath.Join(dir, "indirect")
 
 	orphan := &unit.Unit{
 		Name:      "orphan.service",
@@ -518,7 +519,17 @@ func TestMissingRequirementNotStarted(t *testing.T) {
 	defer close(dispStop)
 	d.Start(dispStop)
 
-	sup, err := New([]*unit.Unit{orphan, chained, ordered}, nil, d, &cgroup.Manager{})
+	// Requires= the orphan with no ordering: the missing unit two levels
+	// down still keeps it from starting.
+	indirect := &unit.Unit{
+		Name:      "indirect.service",
+		Kind:      unit.KindService,
+		Type:      unit.TypeOneshot,
+		Requires:  []string{"orphan.service"},
+		ExecStart: []string{"/bin/touch", indirectMark},
+	}
+
+	sup, err := New([]*unit.Unit{orphan, chained, ordered, indirect}, nil, d, &cgroup.Manager{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -529,7 +540,7 @@ func TestMissingRequirementNotStarted(t *testing.T) {
 		<-runDone
 	}()
 
-	for _, name := range []string{"orphan.service", "chained.service", "ordered.service"} {
+	for _, name := range []string{"orphan.service", "chained.service", "ordered.service", "indirect.service"} {
 		select {
 		case <-sup.ready[name]:
 		case <-time.After(5 * time.Second):
@@ -545,9 +556,12 @@ func TestMissingRequirementNotStarted(t *testing.T) {
 	if _, err := os.Stat(orderedMark); err != nil {
 		t.Errorf("After= a missing unit blocked the start: %v", err)
 	}
+	if _, err := os.Stat(indirectMark); err == nil {
+		t.Error("unit ran although its Requires= chain reaches a unit that does not exist")
+	}
 	sup.mu.Lock()
 	defer sup.mu.Unlock()
-	if !sup.failed["orphan.service"] || !sup.failed["chained.service"] || sup.failed["ordered.service"] {
-		t.Errorf("failed = %v, want orphan.service and chained.service only", sup.failed)
+	if !sup.failed["orphan.service"] || !sup.failed["chained.service"] || !sup.failed["indirect.service"] || sup.failed["ordered.service"] {
+		t.Errorf("failed = %v, want orphan, chained and indirect only", sup.failed)
 	}
 }
