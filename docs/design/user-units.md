@@ -615,10 +615,22 @@ The runtime model:
    `default.target.wants/`).
 2. **Ordering.** Only `After=` and `Before=` edges order jobs, and they
    apply against every job *installed in the manager*, not just the
-   ones from the same transaction. A job is runnable when no unit it is
-   ordered after (for start jobs) or before (for stop jobs) has a
-   pending or running job, which is the check systemd's scheduler makes
-   for each job. So after `systemctl start --no-block B` (a slow
+   ones from the same transaction. For two units joined by an ordering
+   edge (`A After=B`, or equivalently `B Before=A`) that both have a
+   job installed, which job waits depends on both jobs' types, as in
+   systemd's job ordering comparator:
+
+   | A's job | B's job | Who waits |
+   |---|---|---|
+   | start | start | A waits for B (the edge's direction) |
+   | stop | stop | B waits for A (reversed) |
+   | start | stop | A waits for B: the stop finishes first |
+   | stop | start | B waits for A: the stop finishes first |
+
+   A stop always goes first in a mixed pair, whichever way the edge
+   points, so a mixed pair can never wait on each other. A job is
+   runnable when no installed job it must wait for under this table is
+   pending or running. So after `systemctl start --no-block B` (a slow
    oneshot) and a separate `systemctl start A` with `A After=B`, A's job
    waits for B's. Edges to units with no installed job have no effect:
    `A After=B` with B inactive and not being started does not start or
@@ -656,8 +668,14 @@ in the Phase 0 environment:
 - `systemctl start --no-block B` (B a slow oneshot), then
   `systemctl start A` with only `A After=B`: A's job waits until B's
   finishes.
-- `systemctl start A` while `systemctl stop B` is pending, `A After=B`:
-  A's job waits for the stop job, then starts.
+- Mixed start/stop, both edge directions, each with both jobs
+  installed at once and neither waiting on the other in a loop:
+  - `A After=B`, start A + stop B: stop B runs first, then start A.
+  - `A After=B`, stop A + start B: stop A runs first, then start B.
+  - `A Before=B`, start A + stop B: stop B runs first, then start A.
+  - `A Before=B`, stop A + start B: stop A runs first, then start B.
+- Same-type pairs in both directions: with `A After=B`, start A + start
+  B runs B first; stop A + stop B runs A first.
 - `systemctl stop A` while A's start job is still waiting on an ordering
   dependency: the start job completes `canceled`, the stop job runs.
 - `systemctl start A` twice in quick succession: one start, both callers
