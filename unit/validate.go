@@ -62,21 +62,28 @@ func evaluateConditions(u *Unit, lookup Lookup) {
 		}
 	}
 	for _, e := range u.ConditionEnvironment {
-		// "VAR=value" -- present and equal required; "VAR" -- present required.
-		eq := strings.IndexByte(e, '=')
-		if eq < 0 {
-			if _, ok := lookup(e); !ok {
-				u.Condition.Skip = true
-				u.Condition.Reason = fmt.Sprintf("ConditionEnvironment=%s unset", e)
-				return
-			}
-			continue
+		// "VAR=value" -- present and equal required; "VAR" -- present
+		// required. A "!" prefix inverts either, as in systemd.
+		spec, negate := e, false
+		if strings.HasPrefix(spec, "!") {
+			spec, negate = spec[1:], true
 		}
-		name, want := e[:eq], e[eq+1:]
-		got, _ := lookup(name)
-		if got != want {
+		name, want, hasValue := strings.Cut(spec, "=")
+		have, set := lookup(name)
+		match := set
+		if hasValue {
+			match = have == want
+		}
+		if match == negate {
 			u.Condition.Skip = true
-			u.Condition.Reason = fmt.Sprintf("ConditionEnvironment=%s (have %q, want %q)", e, got, want)
+			switch {
+			case negate:
+				u.Condition.Reason = fmt.Sprintf("ConditionEnvironment=%s unmet (have %q)", e, have)
+			case !hasValue:
+				u.Condition.Reason = fmt.Sprintf("ConditionEnvironment=%s unset", e)
+			default:
+				u.Condition.Reason = fmt.Sprintf("ConditionEnvironment=%s (have %q, want %q)", e, have, want)
+			}
 			return
 		}
 	}

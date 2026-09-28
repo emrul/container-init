@@ -85,9 +85,14 @@ container-init reads from two directories, in priority order:
 
 Both paths are configurable via the `--units` and `--drop-in` flags.
 
-The `--strict-units` flag promotes any parser warning (unknown
-directive / section, unsupported value form) into a fatal load error
--- useful in CI to catch typos before they ship.
+A unit whose `Requires=` chain reaches a unit that neither directory
+installs is also a load warning (`required unit X not found (required
+by Y); Z will not start`), so an image that drops a required unit is
+caught at build time rather than losing services at run time.
+
+The `--strict-units` flag promotes any load warning (unknown
+directive / section, unsupported value form, missing requirement) into
+a fatal load error -- useful in CI to catch typos before they ship.
 
 The `--validate` flag loads + parses units, prints a summary, and
 exits without supervising. Combined with `--strict-units`, this is a
@@ -246,7 +251,8 @@ Drop-ins participate in the supervisor's full lifecycle:
   through the units it requires -- is a failed requirement too: the
   unit is not started (`not started: required unit X not found`),
   with or without `After=`. `After=` / `Before=` / `Wants=` naming a
-  missing unit are ignored. Each
+  missing unit are ignored. A missing requirement is also reported as a
+  load warning, so `--validate` catches it. Each
   step logs a line (`failed to start`, `failed`, `not started: required
   unit X failed`). A dependency failure does not fire the dependent's
   own `OnFailure=` / `ExitContainerOnFailure=`.
@@ -262,7 +268,10 @@ Drop-ins participate in the supervisor's full lifecycle:
   limit. Unlike systemd, a unit that sets neither has no limit.
 - **ConditionPathExists= / ConditionPathExistsGlob= / ConditionEnvironment= /
   ConditionUser=** -- unit is loaded but skipped at boot when conditions
-  are unmet. `ConditionUser=` takes a uid or user name, optionally
+  are unmet. `ConditionEnvironment=` takes `VAR` (set) or `VAR=value`
+  (set to exactly that value), either negated with `!` as in systemd:
+  `ConditionEnvironment=!FEATURE=false` runs unless `FEATURE` is
+  `false`. `ConditionUser=` takes a uid or user name, optionally
   negated with `!`, and compares it with container-init's own uid --
   e.g. `ConditionUser=root` for a unit that needs a root PID 1,
   `ConditionUser=!root` for one that only makes sense without it. Names
@@ -306,7 +315,9 @@ Drop-ins participate in the supervisor's full lifecycle:
   to read other files instead -- for example the files an
   `nss_wrapper` setup generates to rename the user of a non-root
   container. They are read at each unit start, so a unit can generate
-  them for the units after it.
+  them for the units after it; while a named file does not exist yet,
+  lookups read `/etc/passwd` / `/etc/group` instead, and the file used
+  is logged when it changes.
 
 ## Worked examples
 

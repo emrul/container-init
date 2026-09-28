@@ -178,3 +178,36 @@ func TestResolveEnvFileOverride(t *testing.T) {
 		t.Error("app-user resolved from the default file despite the override")
 	}
 }
+
+// An override file that does not exist yet falls back to the default,
+// so a unit that runs before the file is generated still resolves; once
+// the file exists it is read instead.
+func TestResolveEnvFileMissingFallsBack(t *testing.T) {
+	withFakeFiles(t, samplePasswd, sampleGroup)
+	dir := t.TempDir()
+	pp := filepath.Join(dir, "passwd")
+	gp := filepath.Join(dir, "group")
+	t.Setenv(PasswdFileEnv, pp)
+	t.Setenv(GroupFileEnv, gp)
+
+	got, err := Resolve("alice", "", "")
+	if err != nil {
+		t.Fatalf("Resolve before the override exists: %v", err)
+	}
+	if got.UID != 1500 || !reflect.DeepEqual(got.SupplementaryGroups, []uint32{29, 44}) {
+		t.Errorf("got %#v, want alice from the default files", got)
+	}
+
+	if err := os.WriteFile(pp, []byte("renamed:x:1000:1000::/home/renamed:/bin/bash\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(gp, []byte("renamed:x:1000:\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Resolve("renamed", "", ""); err != nil {
+		t.Errorf("Resolve after the override was written: %v", err)
+	}
+	if _, err := Resolve("alice", "", ""); err == nil {
+		t.Error("alice resolved from the default file although the override now exists")
+	}
+}

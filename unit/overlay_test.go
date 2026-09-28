@@ -119,3 +119,33 @@ func TestLoadOverlayWithRealMissingDir(t *testing.T) {
 		t.Errorf("missing dir should not error: %v", err)
 	}
 }
+
+// A Requires= chain reaching a unit that no directory provides is a
+// warning naming the unit and the missing requirement, and an error
+// under Strict.
+func TestLoadOverlayMissingRequirement(t *testing.T) {
+	core := t.TempDir()
+	writeUnit(t, core, "a.service", "[Unit]\nRequires=b.service\n[Service]\nExecStart=/bin/true\n")
+	writeUnit(t, core, "b.service", "[Unit]\nRequires=gone.service\nWants=also-gone.service\n[Service]\nExecStart=/bin/true\n")
+	writeUnit(t, core, "c.service", "[Unit]\nAfter=gone.service\n[Service]\nExecStart=/bin/true\n")
+
+	_, warnings, _, err := LoadOverlay([]string{core}, Options{})
+	if err != nil {
+		t.Fatalf("LoadOverlay: %v", err)
+	}
+	var got []string
+	for _, w := range warnings {
+		got = append(got, w.String())
+	}
+	want := []string{
+		"a.service [Unit] Requires: required unit gone.service not found (required by b.service); a.service will not start",
+		"b.service [Unit] Requires: required unit gone.service not found; b.service will not start",
+	}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("warnings =\n  %q\nwant\n  %q", got, want)
+	}
+
+	if _, _, _, err := LoadOverlay([]string{core}, Options{Strict: true}); err == nil {
+		t.Error("Strict: no error for a missing requirement")
+	}
+}

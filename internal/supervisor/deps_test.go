@@ -137,14 +137,14 @@ func TestMissingRequirementAnywhereInChain(t *testing.T) {
 	cases := []struct {
 		name  string
 		units []*unit.Unit
-		want  map[string]missingRequirement // units expected to fail
+		want  map[string]unit.MissingRequirement // units expected to fail
 	}{
 		{
 			name:  "two levels",
 			units: []*unit.Unit{req("a.service", "b.service"), req("b.service", "gone.service")},
-			want: map[string]missingRequirement{
-				"a.service": {"gone.service", "b.service"},
-				"b.service": {"gone.service", "b.service"},
+			want: map[string]unit.MissingRequirement{
+				"a.service": {Name: "gone.service", Via: "b.service"},
+				"b.service": {Name: "gone.service", Via: "b.service"},
 			},
 		},
 		{
@@ -152,10 +152,10 @@ func TestMissingRequirementAnywhereInChain(t *testing.T) {
 			units: []*unit.Unit{
 				req("a.service", "b.service"), req("b.service", "c.service"), req("c.service", "gone.service"),
 			},
-			want: map[string]missingRequirement{
-				"a.service": {"gone.service", "c.service"},
-				"b.service": {"gone.service", "c.service"},
-				"c.service": {"gone.service", "c.service"},
+			want: map[string]unit.MissingRequirement{
+				"a.service": {Name: "gone.service", Via: "c.service"},
+				"b.service": {Name: "gone.service", Via: "c.service"},
+				"c.service": {Name: "gone.service", Via: "c.service"},
 			},
 		},
 		{
@@ -163,22 +163,22 @@ func TestMissingRequirementAnywhereInChain(t *testing.T) {
 			units: []*unit.Unit{
 				req("a.service", "b.service", "gone.service"), req("b.service", "a.service"),
 			},
-			want: map[string]missingRequirement{
-				"a.service": {"gone.service", "a.service"},
-				"b.service": {"gone.service", "a.service"},
+			want: map[string]unit.MissingRequirement{
+				"a.service": {Name: "gone.service", Via: "a.service"},
+				"b.service": {Name: "gone.service", Via: "a.service"},
 			},
 		},
 		{
 			name:  "cycle with nothing missing",
 			units: []*unit.Unit{req("a.service", "b.service"), req("b.service", "a.service")},
-			want:  map[string]missingRequirement{},
+			want:  map[string]unit.MissingRequirement{},
 		},
 		{
 			name: "missing only behind Wants=",
 			units: []*unit.Unit{
 				req("a.service", "b.service"), {Name: "b.service", Wants: []string{"gone.service"}},
 			},
-			want: map[string]missingRequirement{},
+			want: map[string]unit.MissingRequirement{},
 		},
 	}
 	for _, tc := range cases {

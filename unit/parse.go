@@ -110,6 +110,21 @@ func LoadOverlay(dirs []string, opts Options) ([]*Unit, []Warning, []Override, e
 		out = append(out, u)
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	// A Requires= chain that reaches a unit not in the set keeps the
+	// unit from starting; say so now, so --validate and --strict-units
+	// catch an image that dropped a required unit.
+	missing := MissingRequirements(byName)
+	for _, u := range out {
+		m, ok := missing[u.Name]
+		if !ok {
+			continue
+		}
+		msg := fmt.Sprintf("required unit %s not found; %s will not start", m.Name, u.Name)
+		if m.Via != u.Name {
+			msg = fmt.Sprintf("required unit %s not found (required by %s); %s will not start", m.Name, m.Via, u.Name)
+		}
+		warnings = append(warnings, Warning{Path: u.Path, Section: "Unit", Directive: "Requires", Message: msg})
+	}
 	if len(errs) > 0 {
 		return out, warnings, overrides, fmt.Errorf("unit load errors:\n  %s", strings.Join(errs, "\n  "))
 	}

@@ -68,3 +68,34 @@ ExecStart=/bin/true
 		t.Errorf("ConditionUser = %v, want @system dropped", units[0].ConditionUser)
 	}
 }
+
+func TestConditionEnvironment(t *testing.T) {
+	env := map[string]string{"MODE": "root", "EMPTY": ""}
+	lookup := func(k string) (string, bool) { v, ok := env[k]; return v, ok }
+	cases := []struct {
+		conds []string
+		skip  bool
+	}{
+		{[]string{"MODE"}, false},
+		{[]string{"UNSET"}, true},
+		{[]string{"EMPTY"}, false},
+		{[]string{"MODE=root"}, false},
+		{[]string{"MODE=user"}, true},
+		{[]string{"!MODE"}, true},
+		{[]string{"!UNSET"}, false},
+		{[]string{"!EMPTY"}, true}, // set, though empty
+		{[]string{"!MODE=root"}, true},
+		{[]string{"!MODE=user"}, false},
+		{[]string{"!UNSET=false"}, false}, // unset is not "false"
+		{[]string{"MODE", "!MODE=user"}, false},
+		{[]string{"MODE", "!MODE=root"}, true},
+	}
+	for _, tc := range cases {
+		u := &Unit{Name: "x.service", ConditionEnvironment: tc.conds}
+		evaluateConditions(u, lookup)
+		if u.Condition.Skip != tc.skip {
+			t.Errorf("ConditionEnvironment=%v: skip=%v (%s), want %v",
+				tc.conds, u.Condition.Skip, u.Condition.Reason, tc.skip)
+		}
+	}
+}
