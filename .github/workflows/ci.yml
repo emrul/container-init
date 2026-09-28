@@ -26,3 +26,28 @@ jobs:
           go-version-file: go.mod
       - run: make build
 
+
+  # The supervisor's cgroup tests need root and a writable cgroup v2,
+  # and the seccomp clone3 fallback test also needs a static test binary
+  # (glibc's pthread_create cannot survive its filter). The runner gives
+  # neither, so build the tests static and run them as root in a
+  # privileged container with its own cgroup namespace -- the same
+  # position container-init is in as PID 1.
+  supervisor-privileged:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: CGO_ENABLED=0 go test -c -o supervisor.test ./internal/supervisor/
+      - name: Run as root with writable cgroup v2
+        run: |
+          set -o pipefail
+          docker run --rm --privileged --cgroupns=private \
+            -v "$PWD":/w -w /w/internal/supervisor ubuntu:24.04 \
+            /w/supervisor.test -test.v | tee test.log
+          # These must run, not skip.
+          for t in TestSpawnStartsInsideUnitCgroup TestSeccompDeniedCloneIntoCgroupFallsBack TestWrapperRunsAsUnitUser; do
+            grep -q -- "--- PASS: $t " test.log || { echo "::error::$t did not pass"; exit 1; }
+          done
