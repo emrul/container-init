@@ -241,7 +241,11 @@ Drop-ins participate in the supervisor's full lifecycle:
   Units that only order `After=` it then start anyway; units that
   both `Requires=` it and order `After=` it are not started and fail in
   turn, as in systemd. A unit that `Requires=` it without `After=` has
-  not waited for it and is not stopped by the failure. Each
+  not waited for it and is not stopped by the failure. A `Requires=`
+  naming a unit that is not installed is a failed requirement too: the
+  unit is not started (`not started: required unit X not found`),
+  with or without `After=`. `After=` / `Before=` / `Wants=` naming a
+  missing unit are ignored. Each
   step logs a line (`failed to start`, `failed`, `not started: required
   unit X failed`). A dependency failure does not fire the dependent's
   own `OnFailure=` / `ExitContainerOnFailure=`.

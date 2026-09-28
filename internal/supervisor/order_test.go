@@ -90,7 +90,7 @@ func TestBeforeAndAfterAgreeingDoNotDuplicate(t *testing.T) {
 }
 
 func TestBeforeNamingAnAbsentUnitIsIgnored(t *testing.T) {
-	// Matches how topoSort and waitDeps already treat unknown names: an image
+	// Matches how topoSort and waitDeps treat an unknown After= name: an image
 	// that does not ship the target unit must still boot.
 	names := order(t, units(before("accessibility.service", "not-installed.service")))
 	if len(names) != 1 || names[0] != "accessibility.service" {

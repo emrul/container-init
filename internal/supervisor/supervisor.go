@@ -171,13 +171,23 @@ func (s *Supervisor) settle(name string, failed bool) bool {
 // the requirement fails the unit may already be running, which is
 // systemd's rule too. ok=false with an empty failedDep means the
 // supervisor stopped first.
+//
+// A Requires= naming a unit that is not loaded fails at once, whatever
+// the ordering: systemd cannot build the start job and does not start
+// the unit ("Unit X not found"). Missing After= / Wants= names are
+// ignored, as in systemd.
 func (s *Supervisor) waitDeps(u *unit.Unit) (failedDep string, ok bool) {
+	for _, name := range u.Requires {
+		if _, known := s.byName[name]; !known {
+			return name, false
+		}
+	}
 	for _, name := range u.After {
 		s.mu.Lock()
 		ch, known := s.ready[name]
 		s.mu.Unlock()
 		if !known {
-			continue // unknown dep -- skip silently (matches addEdge's behaviour in topoSort)
+			continue // not loaded: nothing to order against (matches addEdge in topoSort)
 		}
 		select {
 		case <-ch:
@@ -200,9 +210,19 @@ func (s *Supervisor) waitDeps(u *unit.Unit) (failedDep string, ok bool) {
 // As in systemd, this is not a failure of u itself: OnFailure= and
 // ExitContainerOnFailure= do not fire.
 func (s *Supervisor) dependencyFailed(u *unit.Unit, dep string) {
-	log.Printf("unit %s: not started: required unit %s failed", u.Name, dep)
-	s.event(u.Name, "dependency_failed", map[string]any{"dependency": dep})
+	s.logDependencyFailed(u, dep)
 	s.markFailed(u.Name)
+}
+
+// logDependencyFailed logs that u was not started because its
+// requirement dep failed or does not exist.
+func (s *Supervisor) logDependencyFailed(u *unit.Unit, dep string) {
+	reason := "failed"
+	if _, known := s.byName[dep]; !known {
+		reason = "not found"
+	}
+	log.Printf("unit %s: not started: required unit %s %s", u.Name, dep, reason)
+	s.event(u.Name, "dependency_failed", map[string]any{"dependency": dep, "reason": reason})
 }
 
 // Run starts every non-skipped unit and blocks until Stop is invoked
@@ -639,8 +659,7 @@ func (s *Supervisor) driveNative(sock *unit.Unit, bound *socketact.Bound) {
 	// until prerequisite oneshot units have completed.
 	if dep, ok := s.waitDeps(svc); !ok {
 		if dep != "" {
-			log.Printf("unit %s: not started: required unit %s failed", svc.Name, dep)
-			s.event(svc.Name, "dependency_failed", map[string]any{"dependency": dep})
+			s.logDependencyFailed(svc, dep)
 		}
 		return
 	}
@@ -732,8 +751,7 @@ func (s *Supervisor) driveProxy(sock *unit.Unit, bound *socketact.Bound) {
 func (s *Supervisor) runHelperLoop(svc *unit.Unit, helperUp chan struct{}) {
 	if dep, ok := s.waitDeps(svc); !ok {
 		if dep != "" {
-			log.Printf("unit %s: not started: required unit %s failed", svc.Name, dep)
-			s.event(svc.Name, "dependency_failed", map[string]any{"dependency": dep})
+			s.logDependencyFailed(svc, dep)
 		}
 		close(helperUp) // unblock the accept loop
 		return

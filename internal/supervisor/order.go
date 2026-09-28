@@ -21,7 +21,7 @@ import (
 // unknown-directive warning), silently no-ordering at run time.
 //
 // A Before= naming a unit that is not loaded is ignored, matching how
-// topoSort and waitDeps already treat unknown names.
+// topoSort and waitDeps treat an unknown After= name.
 func resolveBefore(units []*unit.Unit) {
 	byName := make(map[string]*unit.Unit, len(units))
 	for _, u := range units {

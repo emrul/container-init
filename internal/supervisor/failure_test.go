@@ -480,3 +480,74 @@ func TestOnFailureCycleWithSpentLimits(t *testing.T) {
 		t.Errorf("%d refused OnFailure= invocation(s), want 1; log:\n%s", n, logs.String())
 	}
 }
+
+// TestMissingRequirementNotStarted: a unit whose Requires= names a unit
+// that does not exist is not started, and fails the units that require
+// it in turn; a unit that only orders After= the missing name starts.
+func TestMissingRequirementNotStarted(t *testing.T) {
+	dir := t.TempDir()
+	orphanMark := filepath.Join(dir, "orphan")
+	chainedMark := filepath.Join(dir, "chained")
+	orderedMark := filepath.Join(dir, "ordered")
+
+	orphan := &unit.Unit{
+		Name:      "orphan.service",
+		Kind:      unit.KindService,
+		Type:      unit.TypeOneshot,
+		Requires:  []string{"not-installed.service"},
+		ExecStart: []string{"/bin/touch", orphanMark},
+	}
+	chained := &unit.Unit{
+		Name:      "chained.service",
+		Kind:      unit.KindService,
+		Type:      unit.TypeOneshot,
+		After:     []string{"orphan.service"},
+		Requires:  []string{"orphan.service"},
+		ExecStart: []string{"/bin/touch", chainedMark},
+	}
+	ordered := &unit.Unit{
+		Name:      "ordered.service",
+		Kind:      unit.KindService,
+		Type:      unit.TypeOneshot,
+		After:     []string{"not-installed.service"},
+		ExecStart: []string{"/bin/touch", orderedMark},
+	}
+
+	d := pid1.NewDispatcher()
+	dispStop := make(chan struct{})
+	defer close(dispStop)
+	d.Start(dispStop)
+
+	sup, err := New([]*unit.Unit{orphan, chained, ordered}, nil, d, &cgroup.Manager{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	runDone := make(chan struct{})
+	go func() { sup.Run(); close(runDone) }()
+	defer func() {
+		sup.Stop()
+		<-runDone
+	}()
+
+	for _, name := range []string{"orphan.service", "chained.service", "ordered.service"} {
+		select {
+		case <-sup.ready[name]:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s never settled", name)
+		}
+	}
+	if _, err := os.Stat(orphanMark); err == nil {
+		t.Error("unit ran despite its Requires= naming a unit that does not exist")
+	}
+	if _, err := os.Stat(chainedMark); err == nil {
+		t.Error("dependent of a not-started unit ran")
+	}
+	if _, err := os.Stat(orderedMark); err != nil {
+		t.Errorf("After= a missing unit blocked the start: %v", err)
+	}
+	sup.mu.Lock()
+	defer sup.mu.Unlock()
+	if !sup.failed["orphan.service"] || !sup.failed["chained.service"] || sup.failed["ordered.service"] {
+		t.Errorf("failed = %v, want orphan.service and chained.service only", sup.failed)
+	}
+}

@@ -100,3 +100,30 @@ func TestWaitDepsRequiresWithoutAfter(t *testing.T) {
 		t.Errorf("waitDeps = (%q, false), want ok: Requires= without After= must not propagate failure", failedDep)
 	}
 }
+
+// A Requires= naming a unit that is not loaded fails the dependent at
+// once, with or without After=; missing After= / Wants= names do not.
+func TestWaitDepsMissingRequirement(t *testing.T) {
+	cases := []struct {
+		name   string
+		u      *unit.Unit
+		wantOK bool
+	}{
+		{"requires only", &unit.Unit{Name: "u.service", Requires: []string{"gone.service"}}, false},
+		{"requires and after", &unit.Unit{Name: "u.service", Requires: []string{"gone.service"}, After: []string{"gone.service"}}, false},
+		{"after only", &unit.Unit{Name: "u.service", After: []string{"gone.service"}}, true},
+		{"wants only", &unit.Unit{Name: "u.service", Wants: []string{"gone.service"}}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newDepsSupervisor(t, tc.u)
+			failedDep, ok := s.waitDeps(tc.u)
+			if ok != tc.wantOK {
+				t.Fatalf("waitDeps = (%q, %v), want ok=%v", failedDep, ok, tc.wantOK)
+			}
+			if !ok && failedDep != "gone.service" {
+				t.Errorf("failedDep = %q, want gone.service", failedDep)
+			}
+		})
+	}
+}
