@@ -38,6 +38,7 @@ type Supervisor struct {
 	dispatcher *pid1.Dispatcher
 	cgroup     *cgroup.Manager
 	postLabels string // CONTAINER_INIT_TRACE_LABELS -- image policy
+	euid, egid uint32 // container-init's own identity; see credentialPlan
 	stopOnce   sync.Once
 	stopCh     chan struct{}
 	doneCh     chan struct{}
@@ -103,6 +104,8 @@ func New(units []*unit.Unit, tracer *trace.Tracer, dispatcher *pid1.Dispatcher, 
 		dispatcher: dispatcher,
 		cgroup:     cg,
 		postLabels: os.Getenv("CONTAINER_INIT_TRACE_LABELS"),
+		euid:       uint32(os.Geteuid()),
+		egid:       uint32(os.Getegid()),
 		stopCh:     make(chan struct{}),
 		doneCh:     make(chan struct{}),
 		services:   make(map[string]*serviceState),
@@ -198,6 +201,10 @@ func (s *Supervisor) dependencyFailed(u *unit.Unit, dep string) {
 // Returns the container exit code.
 func (s *Supervisor) Run() int {
 	defer close(s.doneCh)
+
+	if s.euid != 0 {
+		log.Printf("running as uid %d gid %d, not root: User= units must resolve to this identity; switching is off", s.euid, s.egid)
+	}
 
 	// Pass 1: bind every .socket whose conditions allow. Skipped
 	// sockets (and their attached services) immediately signal ready
@@ -432,7 +439,13 @@ func (s *Supervisor) spawnAndWait(u *unit.Unit, extra *socketact.Bound, onSpawne
 		if err != nil {
 			return s.startFailed(u, fmt.Errorf("privilege drop: %w", err))
 		}
-		applyCredential(cmd.SysProcAttr, id.UID, id.GID, id.SupplementaryGroups)
+		switchID, err := credentialPlan(s.euid, s.egid, id)
+		if err != nil {
+			return s.startFailed(u, err)
+		}
+		if switchID {
+			applyCredential(cmd.SysProcAttr, id.UID, id.GID, id.SupplementaryGroups)
+		}
 		// Replace HOME / USER / LOGNAME with the resolved identity's
 		// values. This wins over both the inherited container-init
 		// environment AND any matching key in u.Environment from the
@@ -784,6 +797,24 @@ func (s *Supervisor) shutdown() int {
 		s.tracer.Event("reverse_shutdown_done", map[string]any{"exit": exit})
 	}
 	return exit
+}
+
+// credentialPlan decides how a User= unit is started. As root,
+// container-init switches to the unit's identity. Without root it cannot
+// switch at all -- setgroups needs CAP_SETGID even when nothing changes,
+// and a non-root container has no effective capabilities -- so a unit
+// whose uid and gid are already ours runs as-is, keeping container-init's
+// supplementary groups, and any other unit is refused rather than
+// started as the wrong user.
+func credentialPlan(euid, egid uint32, id userdb.Identity) (switchID bool, err error) {
+	if euid == 0 {
+		return true, nil
+	}
+	if id.UID == euid && id.GID == egid {
+		return false, nil
+	}
+	return false, fmt.Errorf("unit wants uid %d gid %d, container-init runs as uid %d gid %d and cannot switch",
+		id.UID, id.GID, euid, egid)
 }
 
 // startFailed logs a unit whose ExecStart could not be started (bad

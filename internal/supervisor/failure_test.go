@@ -5,6 +5,7 @@ package supervisor
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -78,5 +79,65 @@ func TestStartFailureSettlesDependents(t *testing.T) {
 	defer sup.mu.Unlock()
 	if !sup.failed["broken.service"] || !sup.failed["requiring.service"] {
 		t.Errorf("failed = %v, want broken.service and requiring.service", sup.failed)
+	}
+}
+
+// TestNonRootUserUnits runs only without root (CI's runner user, or a
+// container started with --user): a User= unit resolving to our own
+// identity runs as-is, and one wanting another uid fails to start.
+func TestNonRootUserUnits(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("needs a non-root euid")
+	}
+	dir := t.TempDir()
+	mark := filepath.Join(dir, "ran")
+	uid, gid := strconv.Itoa(os.Geteuid()), strconv.Itoa(os.Getegid())
+	same := &unit.Unit{
+		Name:      "same.service",
+		Kind:      unit.KindService,
+		Type:      unit.TypeOneshot,
+		User:      uid,
+		Group:     gid,
+		ExecStart: []string{"/bin/touch", mark},
+	}
+	other := &unit.Unit{
+		Name:      "other.service",
+		Kind:      unit.KindService,
+		Type:      unit.TypeOneshot,
+		User:      strconv.Itoa(os.Geteuid() + 1),
+		Group:     gid,
+		ExecStart: []string{"/bin/true"},
+	}
+
+	d := pid1.NewDispatcher()
+	dispStop := make(chan struct{})
+	defer close(dispStop)
+	d.Start(dispStop)
+
+	sup, err := New([]*unit.Unit{same, other}, nil, d, &cgroup.Manager{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	runDone := make(chan struct{})
+	go func() { sup.Run(); close(runDone) }()
+	defer func() {
+		sup.Stop()
+		<-runDone
+	}()
+
+	for _, name := range []string{"same.service", "other.service"} {
+		select {
+		case <-sup.ready[name]:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s never settled", name)
+		}
+	}
+	if _, err := os.Stat(mark); err != nil {
+		t.Errorf("same-identity User= unit did not run: %v", err)
+	}
+	sup.mu.Lock()
+	defer sup.mu.Unlock()
+	if sup.failed["same.service"] || !sup.failed["other.service"] {
+		t.Errorf("failed = %v, want only other.service", sup.failed)
 	}
 }

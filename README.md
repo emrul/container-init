@@ -252,6 +252,15 @@ Drop-ins participate in the supervisor's full lifecycle:
   the `${VAR:-default}` env-expansion form so per-image overrides
   flow through automatically.
 
+  When container-init itself runs without root (the container is
+  started with `--user`), it cannot switch identity at all. A `User=`
+  unit that resolves to container-init's own uid and gid then runs
+  as-is, keeping container-init's supplementary groups; one that wants
+  any other identity fails to start with a log line naming both. One
+  line at boot says switching is off. A numeric `User=` with no passwd
+  entry gets gid 0 unless `Group=` is set, so under a non-root
+  container-init such a unit needs an explicit `Group=` to match.
+
 ## Worked examples
 
 ### 1. One-shot at boot
