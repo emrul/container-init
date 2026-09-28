@@ -11,9 +11,32 @@ on:
       tag:
         required: true
         type: string
+  # Build an existing tag with this workflow as it is on the chosen
+  # branch: a dry run to test the workflow, or -- dry_run unticked -- to
+  # publish a release whose tag-triggered run failed, after fixing the
+  # workflow on main. (A tag-triggered run always uses the workflow as
+  # it was at the tag, so it cannot pick up the fix.)
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build, e.g. v1.2.0
+        required: true
+        type: string
+      dry_run:
+        description: Build only; do not create the release
+        type: boolean
+        default: true
+  # A change to any workflow -- including a Dependabot actions bump --
+  # runs the whole job on the PR's code, without publishing.
+  pull_request:
+    paths:
+      - '.github/workflows/**'
 
 env:
-  TAG: ${{ inputs.tag || github.ref_name }}
+  # The tag to build and publish; empty on pull_request, which builds
+  # the PR's code instead.
+  TAG: ${{ github.event_name != 'pull_request' && (inputs.tag || github.ref_name) || '' }}
+  DRY_RUN: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
 
 jobs:
   release:
@@ -31,12 +54,17 @@ jobs:
           go-version-file: go.mod
 
       - name: Build binaries
-        run: make build VERSION=${{ env.TAG }}
+        # Without a tag the Makefile's default (git describe) names the
+        # version.
+        run: |
+          make build ${TAG:+VERSION="$TAG"}
+          ./bin/container-init.linux-amd64 -version
 
       - name: Create GitHub release
+        if: env.DRY_RUN != 'true'
         run: |
-          gh release create ${{ env.TAG }} \
-            --title "container-init ${{ env.TAG }}" \
+          gh release create "$TAG" \
+            --title "container-init $TAG" \
             --generate-notes \
             bin/container-init.linux-amd64 \
             bin/container-init.linux-arm64 \
@@ -45,3 +73,9 @@ jobs:
         env:
           GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
+
+      - name: Dry run -- not publishing
+        if: env.DRY_RUN == 'true'
+        run: |
+          echo "Dry run (${{ github.event_name }}): built ${TAG:-the PR head}, not creating a release."
+          ls -l bin/
