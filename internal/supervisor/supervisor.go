@@ -863,7 +863,12 @@ func (s *Supervisor) shutdown() int {
 
 	for i := len(procs) - 1; i >= 0; i-- {
 		p := procs[i]
-		if p.exited || p.pid <= 0 {
+		// exited is written by spawnAndWait under s.mu when the
+		// dispatcher reports the exit, which can race this pass.
+		s.mu.Lock()
+		done := p.exited
+		s.mu.Unlock()
+		if done || p.pid <= 0 {
 			continue
 		}
 		// Polite first pass: SIGTERM the immediate child so anything
