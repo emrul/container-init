@@ -58,6 +58,9 @@ type Supervisor struct {
 	// markFailed rather than signalReady: they gave up before ever
 	// becoming ready. waitDeps reads it once the channel is closed.
 	failed map[string]bool
+	// limits holds each unit's start-limit state, shared by every path
+	// that starts it; see allowStart.
+	limits map[string]*startLimiter
 }
 
 type serviceState struct {
@@ -94,8 +97,10 @@ func New(units []*unit.Unit, tracer *trace.Tracer, dispatcher *pid1.Dispatcher, 
 		byName[u.Name] = u
 	}
 	ready := make(map[string]chan struct{}, len(ordered))
+	limits := make(map[string]*startLimiter, len(ordered))
 	for _, u := range ordered {
 		ready[u.Name] = make(chan struct{})
+		limits[u.Name] = newStartLimiter(u)
 	}
 	return &Supervisor{
 		units:      ordered,
@@ -112,6 +117,7 @@ func New(units []*unit.Unit, tracer *trace.Tracer, dispatcher *pid1.Dispatcher, 
 		bounds:     make(map[string]*socketact.Bound),
 		ready:      ready,
 		failed:     make(map[string]bool),
+		limits:     limits,
 	}, nil
 }
 
@@ -337,6 +343,10 @@ func (s *Supervisor) runService(u *unit.Unit) {
 			return
 		default:
 		}
+		if !s.allowStart(u) {
+			s.startLimitHit(u)
+			return
+		}
 		exitErr := s.spawnAndWait(u, nil, onSpawned)
 		failed := exitErr != nil
 		s.event(u.Name, "exited", map[string]any{"failed": failed, "err": errString(exitErr)})
@@ -389,6 +399,22 @@ func (s *Supervisor) fireOnFailure(name string) {
 		return
 	}
 	if u.Condition.Skip {
+		return
+	}
+	if !s.allowStart(u) {
+		// A refused invocation does not chain to the target's own
+		// OnFailure=, just as a failed one below does not: with a
+		// cycle (A -> B -> A) and both limits spent, the two would
+		// otherwise fire each other forever without starting anything.
+		log.Printf("OnFailure: %s not invoked: start limit hit (%d starts within %v)",
+			name, u.StartLimitBurst, u.StartLimitIntervalSec)
+		s.event(name, "start_limit_hit", map[string]any{
+			"burst": u.StartLimitBurst, "interval_ms": u.StartLimitIntervalSec.Milliseconds(),
+		})
+		if u.ExitContainerOnFailure {
+			log.Printf("OnFailure target %s requested container exit (start limit hit)", name)
+			s.Stop()
+		}
 		return
 	}
 	log.Printf("OnFailure: invoking %s", name)
@@ -612,6 +638,10 @@ func (s *Supervisor) driveNative(sock *unit.Unit, bound *socketact.Bound) {
 			return
 		default:
 		}
+		if !s.allowStart(svc) {
+			s.startLimitHit(svc)
+			return
+		}
 		exitErr := s.spawnAndWait(svc, bound, nil)
 		failed := exitErr != nil
 		s.event(svc.Name, "exited", map[string]any{"failed": failed, "err": errString(exitErr)})
@@ -702,6 +732,10 @@ func (s *Supervisor) runHelperLoop(svc *unit.Unit, helperUp chan struct{}) {
 			close(helperUp)
 			first = false
 		}
+		if !s.allowStart(svc) {
+			s.startLimitHit(svc)
+			return
+		}
 		exitErr := s.spawnAndWait(svc, nil, nil)
 		failed := exitErr != nil
 		s.event(svc.Name, "exited", map[string]any{"failed": failed, "err": errString(exitErr)})
@@ -719,6 +753,67 @@ func (s *Supervisor) runHelperLoop(svc *unit.Unit, helperUp chan struct{}) {
 				return
 			}
 		}
+	}
+}
+
+// startLimiter enforces StartLimitBurst= / StartLimitIntervalSec= the
+// way systemd's ratelimit does: a window opens at the first start and
+// admits burst starts; a start after the window has elapsed opens a
+// new one. Every start counts, restarts and the first alike.
+type startLimiter struct {
+	burst    int
+	interval time.Duration
+	begin    time.Time
+	n        int
+}
+
+func newStartLimiter(u *unit.Unit) *startLimiter {
+	return &startLimiter{burst: u.StartLimitBurst, interval: u.StartLimitIntervalSec}
+}
+
+// allow reports whether a start at now is within the limit, and if so
+// counts it.
+func (l *startLimiter) allow(now time.Time) bool {
+	if l == nil || l.burst <= 0 || l.interval <= 0 {
+		return true // no limit configured
+	}
+	if l.begin.IsZero() || now.Sub(l.begin) >= l.interval {
+		l.begin, l.n = now, 0
+	}
+	if l.n >= l.burst {
+		return false
+	}
+	l.n++
+	return true
+}
+
+// allowStart counts a start of u against its start limit. Every path
+// that starts a unit goes through here -- its own loop, each socket
+// that activates it, and OnFailure= invocations -- so they share one
+// budget.
+func (s *Supervisor) allowStart(u *unit.Unit) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.limits[u.Name].allow(time.Now())
+}
+
+// startLimitHit fails a unit that would exceed its start limit: it is
+// not started again, and fails like any unit that gave up -- OnFailure=
+// and ExitContainerOnFailure= fire, and units that Requires= it are
+// failed if it never became ready.
+func (s *Supervisor) startLimitHit(u *unit.Unit) {
+	log.Printf("unit %s: start limit hit (%d starts within %v); not starting again",
+		u.Name, u.StartLimitBurst, u.StartLimitIntervalSec)
+	s.event(u.Name, "start_limit_hit", map[string]any{
+		"burst": u.StartLimitBurst, "interval_ms": u.StartLimitIntervalSec.Milliseconds(),
+	})
+	s.markFailed(u.Name)
+	for _, target := range u.OnFailure {
+		go s.fireOnFailure(target)
+	}
+	if u.ExitContainerOnFailure {
+		log.Printf("unit %s: ExitContainerOnFailure -- initiating reverse shutdown", u.Name)
+		s.Stop()
 	}
 }
 

@@ -213,6 +213,7 @@ func LoadFile(path string, opts Options) (*Unit, []Warning, error) {
 			return nil, l.warnings, err
 		}
 	}
+	l.finishStartLimit(u)
 	if err := validate(u); err != nil {
 		return nil, l.warnings, err
 	}
@@ -229,6 +230,8 @@ type loader struct {
 	path     string
 	opts     Options
 	warnings []Warning
+
+	startLimitBurstSet, startLimitIntervalSet bool
 }
 
 func (l *loader) warn(section, directive, msg string) {
@@ -295,10 +298,52 @@ func (l *loader) applyUnitSection(u *Unit, name, value string) error {
 		u.ConditionUser = append(u.ConditionUser, value)
 	case "OnFailure":
 		u.OnFailure = append(u.OnFailure, splitWords(value)...)
+	case "StartLimitBurst", "StartLimitIntervalSec":
+		return l.applyStartLimit(u, name, value)
 	default:
 		l.warn("Unit", name, "directive not in supported subset (ignored)")
 	}
 	return nil
+}
+
+func (l *loader) applyStartLimit(u *Unit, name, value string) error {
+	switch name {
+	case "StartLimitBurst":
+		n, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("StartLimitBurst: %w", err)
+		}
+		u.StartLimitBurst = n
+		l.startLimitBurstSet = true
+	case "StartLimitIntervalSec":
+		d, err := parseDuration(value)
+		if err != nil {
+			return fmt.Errorf("StartLimitIntervalSec: %w", err)
+		}
+		u.StartLimitIntervalSec = d
+		l.startLimitIntervalSet = true
+	}
+	return nil
+}
+
+// Defaults for the half of a start limit a unit leaves unset
+// (systemd's DefaultStartLimitBurst / DefaultStartLimitIntervalSec).
+const (
+	defaultStartLimitBurst    = 5
+	defaultStartLimitInterval = 10 * time.Second
+)
+
+// finishStartLimit fills the unset half of a start limit when the unit
+// set the other. A unit that sets neither has no limit: unlike systemd
+// there is no implicit default, so images that predate enforcement do
+// not start giving up on crash-looping services.
+func (l *loader) finishStartLimit(u *Unit) {
+	if l.startLimitBurstSet && !l.startLimitIntervalSet {
+		u.StartLimitIntervalSec = defaultStartLimitInterval
+	}
+	if l.startLimitIntervalSet && !l.startLimitBurstSet {
+		u.StartLimitBurst = defaultStartLimitBurst
+	}
 }
 
 func (l *loader) applyServiceSection(u *Unit, name, value string) error {
@@ -355,18 +400,10 @@ func (l *loader) applyServiceSection(u *Unit, name, value string) error {
 			return fmt.Errorf("RestartSec: %w", err)
 		}
 		u.RestartSec = d
-	case "StartLimitBurst":
-		n, err := strconv.Atoi(strings.TrimSpace(value))
-		if err != nil {
-			return fmt.Errorf("StartLimitBurst: %w", err)
-		}
-		u.StartLimitBurst = n
-	case "StartLimitIntervalSec":
-		d, err := parseDuration(value)
-		if err != nil {
-			return fmt.Errorf("StartLimitIntervalSec: %w", err)
-		}
-		u.StartLimitIntervalSec = d
+	case "StartLimitBurst", "StartLimitIntervalSec":
+		// Accepted in [Service] as older systemd did; [Unit] is the
+		// documented home.
+		return l.applyStartLimit(u, name, value)
 	case "Environment":
 		// gounit's deserialiser hands us one string with quoting
 		// already collapsed; split on whitespace to get K=V pairs.

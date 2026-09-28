@@ -122,8 +122,12 @@ type Unit struct {
 	ExecStopPost           [][]string // ordered list of post-stop argvs
 	Restart                RestartPolicy
 	RestartSec             time.Duration
-	StartLimitBurst        int
-	StartLimitIntervalSec  time.Duration
+	// Start rate limit: more than StartLimitBurst starts within
+	// StartLimitIntervalSec fails the unit. Either one set alone gets
+	// systemd's default for the other (5 / 10s); 0 in either disables
+	// the limit, as does setting neither.
+	StartLimitBurst       int
+	StartLimitIntervalSec time.Duration
 	Environment            []string // "K=V"
 	EnvironmentFile        []EnvFileRef
 	ExitContainerOnFailure bool

@@ -239,7 +239,15 @@ Drop-ins participate in the supervisor's full lifecycle:
   unit X failed`). A dependency failure does not fire the dependent's
   own `OnFailure=` / `ExitContainerOnFailure=`.
 - **Restart= / RestartSec= / StartLimitBurst= / StartLimitIntervalSec=** --
-  per-unit restart policy and rate limiting.
+  per-unit restart policy and rate limiting. Every start counts, the
+  first and each restart; a unit that would start more than
+  `StartLimitBurst=` times within `StartLimitIntervalSec=` is not
+  started again and fails (`OnFailure=` / `ExitContainerOnFailure=`
+  fire, `Requires=` dependents fail if it never became ready). The
+  limit directives belong in `[Unit]`, as in systemd, and are also
+  accepted in `[Service]`. Setting one alone gets systemd's default
+  for the other (5 starts / 10s), and `0` in either disables the
+  limit. Unlike systemd, a unit that sets neither has no limit.
 - **ConditionPathExists= / ConditionPathExistsGlob= / ConditionEnvironment= /
   ConditionUser=** -- unit is loaded but skipped at boot when conditions
   are unmet. `ConditionUser=` takes a uid or user name, optionally
@@ -304,6 +312,8 @@ TimeoutStartSec=60s
 Description=Background app
 After=window-manager.service
 Requires=window-manager.service
+StartLimitBurst=5
+StartLimitIntervalSec=60s
 
 [Service]
 Type=simple
@@ -312,8 +322,6 @@ WorkingDirectory=${APP_HOME:-/home/app}
 ExecStart=/usr/local/bin/myimage-app --listen 127.0.0.1:5000
 Restart=on-failure
 RestartSec=2s
-StartLimitBurst=5
-StartLimitIntervalSec=60s
 ```
 
 ### 3. Socket-activated helper, native mode

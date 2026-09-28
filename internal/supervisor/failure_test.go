@@ -3,10 +3,15 @@
 package supervisor
 
 import (
+	"bytes"
+	"fmt"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -200,5 +205,200 @@ func TestSkippedServiceSocketNotBound(t *testing.T) {
 				t.Error("skipped service ran")
 			}
 		})
+	}
+}
+
+// TestStartLimitFailsUnit: a oneshot that keeps failing under
+// Restart=on-failure runs StartLimitBurst times, then fails for good
+// and fails the unit that Requires= it.
+func TestStartLimitFailsUnit(t *testing.T) {
+	dir := t.TempDir()
+	countFile := filepath.Join(dir, "count")
+	script := fmt.Sprintf(
+		`n=0; [ -f '%[1]s' ] && n=$(cat '%[1]s'); printf '%%d' $((n+1)) > '%[1]s'; exit 1`,
+		countFile,
+	)
+	flaky := &unit.Unit{
+		Name:                  "flaky.service",
+		Kind:                  unit.KindService,
+		Type:                  unit.TypeOneshot,
+		ExecStart:             []string{"/bin/sh", "-c", script},
+		Restart:               unit.RestartOnFailure,
+		RestartSec:            10 * time.Millisecond,
+		StartLimitBurst:       3,
+		StartLimitIntervalSec: time.Minute,
+	}
+	dependent := &unit.Unit{
+		Name:      "dependent.service",
+		Kind:      unit.KindService,
+		Type:      unit.TypeOneshot,
+		After:     []string{"flaky.service"},
+		Requires:  []string{"flaky.service"},
+		ExecStart: []string{"/bin/true"},
+	}
+
+	d := pid1.NewDispatcher()
+	dispStop := make(chan struct{})
+	defer close(dispStop)
+	d.Start(dispStop)
+
+	sup, err := New([]*unit.Unit{flaky, dependent}, nil, d, &cgroup.Manager{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	runDone := make(chan struct{})
+	go func() { sup.Run(); close(runDone) }()
+	defer func() {
+		sup.Stop()
+		<-runDone
+	}()
+
+	select {
+	case <-sup.ready["dependent.service"]:
+	case <-time.After(5 * time.Second):
+		t.Fatal("dependent.service never settled")
+	}
+	time.Sleep(100 * time.Millisecond) // a 4th run would land well within this
+	data, _ := os.ReadFile(countFile)
+	if n, _ := strconv.Atoi(strings.TrimSpace(string(data))); n != 3 {
+		t.Errorf("flaky.service ran %d time(s), want 3", n)
+	}
+	sup.mu.Lock()
+	defer sup.mu.Unlock()
+	if !sup.failed["flaky.service"] || !sup.failed["dependent.service"] {
+		t.Errorf("failed = %v, want flaky.service and dependent.service", sup.failed)
+	}
+}
+
+// TestStartLimitCoversOnFailure: an OnFailure= target is started
+// through the same start limit as any other unit.
+func TestStartLimitCoversOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	failCount := filepath.Join(dir, "fail")
+	handlerCount := filepath.Join(dir, "handler")
+	counter := func(f, tail string) string {
+		return fmt.Sprintf(`n=0; [ -f '%[1]s' ] && n=$(cat '%[1]s'); printf '%%d' $((n+1)) > '%[1]s'; %[2]s`, f, tail)
+	}
+	failing := &unit.Unit{
+		Name:                  "failing.service",
+		Kind:                  unit.KindService,
+		Type:                  unit.TypeSimple,
+		ExecStart:             []string{"/bin/sh", "-c", counter(failCount, "exit 1")},
+		Restart:               unit.RestartOnFailure,
+		RestartSec:            10 * time.Millisecond,
+		StartLimitBurst:       3,
+		StartLimitIntervalSec: time.Minute,
+		OnFailure:             []string{"handler.service"},
+	}
+	handler := &unit.Unit{
+		Name:                  "handler.service",
+		Kind:                  unit.KindService,
+		Type:                  unit.TypeOneshot,
+		ExecStart:             []string{"/bin/sh", "-c", counter(handlerCount, "exit 0")},
+		StartLimitBurst:       1,
+		StartLimitIntervalSec: time.Minute,
+	}
+
+	d := pid1.NewDispatcher()
+	dispStop := make(chan struct{})
+	defer close(dispStop)
+	d.Start(dispStop)
+
+	sup, err := New([]*unit.Unit{failing, handler}, nil, d, &cgroup.Manager{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	runDone := make(chan struct{})
+	go func() { sup.Run(); close(runDone) }()
+	defer func() {
+		sup.Stop()
+		<-runDone
+	}()
+
+	count := func(f string) int {
+		data, _ := os.ReadFile(f)
+		n, _ := strconv.Atoi(strings.TrimSpace(string(data)))
+		return n
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for count(failCount) < 3 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(200 * time.Millisecond) // let every OnFailure= invocation land
+	if n := count(failCount); n != 3 {
+		t.Errorf("failing.service ran %d time(s), want 3", n)
+	}
+	if n := count(handlerCount); n != 1 {
+		t.Errorf("handler.service ran %d time(s), want 1 (StartLimitBurst=1)", n)
+	}
+}
+
+// syncBuffer is a bytes.Buffer safe to write from the log package and
+// read from the test.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// TestOnFailureCycleWithSpentLimits: a.service and b.service name each
+// other in OnFailure=, and both start limits are spent. A refused
+// invocation must not chain, or the pair re-fires each other forever.
+func TestOnFailureCycleWithSpentLimits(t *testing.T) {
+	var logs syncBuffer
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	failing := func(name, onFailure string, burst int) *unit.Unit {
+		return &unit.Unit{
+			Name:                  name,
+			Kind:                  unit.KindService,
+			Type:                  unit.TypeOneshot,
+			ExecStart:             []string{"/bin/sh", "-c", "exit 1"},
+			OnFailure:             []string{onFailure},
+			StartLimitBurst:       burst,
+			StartLimitIntervalSec: time.Minute,
+		}
+	}
+	// a (Type=simple, so it runs at boot although it is an OnFailure=
+	// target) spends its budget and fires b, which spends its own. c
+	// fires b too; one of the two invocations is refused, and a
+	// chaining refusal would fire a, refused in turn, and so on.
+	a := failing("a.service", "b.service", 1)
+	a.Type = unit.TypeSimple
+	b := failing("b.service", "a.service", 1)
+	c := failing("c.service", "b.service", 0)
+	c.Type = unit.TypeSimple
+
+	d := pid1.NewDispatcher()
+	dispStop := make(chan struct{})
+	defer close(dispStop)
+	d.Start(dispStop)
+
+	sup, err := New([]*unit.Unit{a, b, c}, nil, d, &cgroup.Manager{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	runDone := make(chan struct{})
+	go func() { sup.Run(); close(runDone) }()
+	defer func() {
+		sup.Stop()
+		<-runDone
+	}()
+
+	time.Sleep(300 * time.Millisecond)
+	if n := strings.Count(logs.String(), "start limit hit"); n != 1 {
+		t.Errorf("%d refused OnFailure= invocation(s), want 1; log:\n%s", n, logs.String())
 	}
 }
