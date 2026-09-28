@@ -146,22 +146,28 @@ func TestEnvironmentFileIgnoreMissingSkipped(t *testing.T) {
 	}
 }
 
-// TestEnvironmentDirectiveOverridesEnvFile asserts the documented
-// precedence: Environment= wins over EnvironmentFile=.
-func TestEnvironmentDirectiveOverridesEnvFile(t *testing.T) {
+// TestEnvFileOverridesEnvironmentDirective asserts systemd's
+// precedence (systemd.exec(5)): settings from EnvironmentFile= override
+// Environment=, and a later file overrides an earlier one. A variable
+// set only by Environment= still comes through.
+func TestEnvFileOverridesEnvironmentDirective(t *testing.T) {
 	dir := t.TempDir()
-	envFile := filepath.Join(dir, "base.env")
+	first := filepath.Join(dir, "first.env")
+	second := filepath.Join(dir, "second.env")
 	out := filepath.Join(dir, "out")
-	if err := os.WriteFile(envFile, []byte("WHO=file\n"), 0o644); err != nil {
+	if err := os.WriteFile(first, []byte("WHO=first\nWHAT=first\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(second, []byte("WHAT=second\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	u := &unit.Unit{
 		Name:            "precedence.service",
 		Kind:            unit.KindService,
 		Type:            unit.TypeOneshot,
-		ExecStart:       []string{"/bin/sh", "-c", "printf '%s' \"$WHO\" > " + out},
-		EnvironmentFile: []unit.EnvFileRef{{Path: envFile}},
-		Environment:     []string{"WHO=directive"},
+		ExecStart:       []string{"/bin/sh", "-c", "printf '%s %s %s' \"$WHO\" \"$WHAT\" \"$ONLY\" > " + out},
+		EnvironmentFile: []unit.EnvFileRef{{Path: first}, {Path: second}},
+		Environment:     []string{"WHO=directive", "WHAT=directive", "ONLY=directive"},
 	}
 
 	d := pid1.NewDispatcher()
@@ -184,7 +190,7 @@ func TestEnvironmentDirectiveOverridesEnvFile(t *testing.T) {
 	<-runDone
 
 	got, _ := os.ReadFile(out)
-	if string(got) != "directive" {
-		t.Errorf("Environment= did not win over EnvironmentFile=: got %q", got)
+	if want := "first second directive"; string(got) != want {
+		t.Errorf("child saw WHO WHAT ONLY = %q, want %q", got, want)
 	}
 }

@@ -451,12 +451,13 @@ func (s *Supervisor) spawnAndWait(u *unit.Unit, extra *socketact.Bound, onSpawne
 	}
 	cmd := exec.Command(u.ExecStart[0], u.ExecStart[1:]...)
 	// Build env in systemd's documented precedence:
-	//   inherited PID 1 env  <  EnvironmentFile= (in order)  <  Environment=
-	// Last-write-wins on the resulting slice gives Environment= the
-	// final say, matching systemd-system.conf(5). Files marked
-	// IgnoreMissing (`-/path` syntax) are silently skipped when absent;
-	// any other read error fails the unit.
+	//   inherited PID 1 env  <  Environment=  <  EnvironmentFile= (in order)
+	// Last-write-wins on the resulting slice gives the files the final
+	// say, and a later file beats an earlier one, as systemd.exec(5)
+	// specifies. Files marked IgnoreMissing (`-/path` syntax) are
+	// silently skipped when absent; any other read error fails the unit.
 	cmd.Env = os.Environ()
+	cmd.Env = append(cmd.Env, u.Environment...)
 	for _, ef := range u.EnvironmentFile {
 		entries, err := unit.ParseEnvironmentFile(ef.Path)
 		if err != nil {
@@ -467,7 +468,6 @@ func (s *Supervisor) spawnAndWait(u *unit.Unit, extra *socketact.Bound, onSpawne
 		}
 		cmd.Env = append(cmd.Env, entries...)
 	}
-	cmd.Env = append(cmd.Env, u.Environment...)
 	// Per-unit log tagging. exec.Cmd's internal io.Copy goroutines
 	// drain the child's stdout/stderr into these writers, which inject
 	// "[unit] " in front of every newline-terminated line. The
