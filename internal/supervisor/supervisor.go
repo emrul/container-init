@@ -20,6 +20,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -62,6 +63,9 @@ type Supervisor struct {
 	// limits holds each unit's start-limit state, shared by every path
 	// that starts it; see allowStart.
 	limits map[string]*startLimiter
+	// cgroupAfterSpawn is set once clone3(CLONE_INTO_CGROUP) has been
+	// refused; spawns then move the child into its cgroup afterwards.
+	cgroupAfterSpawn atomic.Bool
 }
 
 type serviceState struct {
@@ -535,17 +539,39 @@ func (s *Supervisor) spawnAndWait(u *unit.Unit, extra *socketact.Bound, onSpawne
 		}
 	}
 
-	// Pre-create the per-unit cgroup so we can place the child into
-	// it the moment fork returns. Mkdir is idempotent across restarts.
+	// Create the per-unit cgroup and start the child inside it, so a
+	// service that forks at once cannot leave children outside it (and
+	// beyond cgroup.kill). Mkdir is idempotent across restarts.
+	placed := false
 	if s.cgroup.Available() {
-		if _, err := s.cgroup.Mkdir(u.Name); err != nil {
+		if dir, err := s.cgroup.Mkdir(u.Name); err != nil {
 			log.Printf("cgroup mkdir %s: %v (falling back to PGID kill path)", u.Name, err)
+		} else if !s.cgroupAfterSpawn.Load() {
+			f, err := os.Open(dir)
+			if err != nil {
+				log.Printf("cgroup open %s: %v (placing after spawn)", dir, err)
+			} else {
+				defer f.Close() // the child has its cgroup once Spawn returns
+				spawnIntoCgroup(cmd.SysProcAttr, int(f.Fd()))
+				placed = true
+			}
 		}
 	}
 
 	s.event(u.Name, "spawn", map[string]any{"argv": u.ExecStart})
 	invokePhase := s.tracer.Begin(trace.PhaseFromUnitName(u.Name))
 	pid, exitCh, err := s.dispatcher.Spawn(cmd)
+	if err != nil && placed && cloneIntoCgroupUnsupported(err) {
+		// The kernel (before 5.7) or a seccomp filter refused clone3
+		// with CLONE_INTO_CGROUP. Fall back to moving each child after
+		// spawn, which leaves a window where an early fork escapes.
+		if !s.cgroupAfterSpawn.Swap(true) {
+			log.Printf("cgroup: cannot spawn into a cgroup (%v); moving units into their cgroup after spawn", err)
+		}
+		cmd = cmdWithoutCgroup(cmd)
+		placed = false
+		pid, exitCh, err = s.dispatcher.Spawn(cmd)
+	}
 	if err != nil {
 		invokePhase.EndStatus("error", map[string]any{"unit": u.Name, "err": err.Error()})
 		return s.startFailed(u, err)
@@ -554,15 +580,11 @@ func (s *Supervisor) spawnAndWait(u *unit.Unit, extra *socketact.Bound, onSpawne
 	if label := trace.PostSpawnLabel(s.postLabels, u.Name); label != "" {
 		s.tracer.MemSnapshot(label)
 	}
-	// Migrate the child into its cgroup. Future fork(2)s by the child
-	// inherit the cgroup, so any double-fork descendants land in the
-	// same atomically-killable group. Race-window note: the child can
-	// in principle fork before this Place lands, leaving its earliest
-	// grandchild in the parent cgroup. In practice the children we
-	// supervise either don't fork at all (Type=simple) or do so well
-	// after the kernel has had time to schedule us (oneshots that
-	// invoke dbus-launch et al), so the window is empirically empty.
-	if s.cgroup.Available() {
+	// Fallback when the child could not be spawned into its cgroup:
+	// migrate it now. Future fork(2)s inherit the cgroup, but anything
+	// the child forked before this Place lands stays in container-init's
+	// cgroup, out of reach of cgroup.kill.
+	if s.cgroup.Available() && !placed {
 		if err := s.cgroup.Place(u.Name, pid); err != nil {
 			log.Printf("cgroup place %s pid=%d: %v", u.Name, pid, err)
 		}
@@ -966,6 +988,24 @@ func credentialPlan(euid, egid uint32, id userdb.Identity) (switchID bool, err e
 	}
 	return false, fmt.Errorf("unit wants uid %d gid %d, container-init runs as uid %d gid %d and cannot switch",
 		id.UID, id.GID, euid, egid)
+}
+
+// cmdWithoutCgroup returns a fresh, unstarted copy of cmd (an exec.Cmd
+// cannot be started twice) that does not ask to be spawned into a
+// cgroup.
+func cmdWithoutCgroup(cmd *exec.Cmd) *exec.Cmd {
+	attr := *cmd.SysProcAttr
+	spawnIntoCgroup(&attr, -1)
+	return &exec.Cmd{
+		Path:        cmd.Path,
+		Args:        cmd.Args,
+		Env:         cmd.Env,
+		Dir:         cmd.Dir,
+		Stdout:      cmd.Stdout,
+		Stderr:      cmd.Stderr,
+		ExtraFiles:  cmd.ExtraFiles,
+		SysProcAttr: &attr,
+	}
 }
 
 // startFailed logs a unit whose ExecStart could not be started (bad

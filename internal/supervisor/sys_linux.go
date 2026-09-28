@@ -27,6 +27,24 @@ func applyCredential(attr *syscall.SysProcAttr, uid, gid uint32, groups []uint32
 	attr.Credential = cred
 }
 
+// spawnIntoCgroup makes the child start life inside the cgroup open
+// as fd: Go then forks with clone3(CLONE_INTO_CGROUP), so the child
+// runs no instruction, and forks no child, outside it. fd < 0 clears
+// the request.
+func spawnIntoCgroup(attr *syscall.SysProcAttr, fd int) {
+	attr.UseCgroupFD = fd >= 0
+	attr.CgroupFD = max(fd, 0)
+}
+
+// cloneIntoCgroupUnsupported reports whether a spawn error means the
+// kernel or a seccomp filter refused clone3(CLONE_INTO_CGROUP) itself:
+// ENOSYS where clone3 is missing or filtered (Docker's default seccomp
+// profile answers ENOSYS), EINVAL where clone3 exists but predates
+// CLONE_INTO_CGROUP (Linux 5.3 to 5.6).
+func cloneIntoCgroupUnsupported(err error) bool {
+	return errors.Is(err, syscall.ENOSYS) || errors.Is(err, syscall.EINVAL)
+}
+
 // killGroup signals every process in pid's group.
 func killGroup(pid int, sig syscall.Signal) error {
 	if pid <= 1 {

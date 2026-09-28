@@ -5,9 +5,10 @@
 // SIGKILLs every member regardless of PID reuse races.
 //
 // Layout: container-init mkdirs <our-cgroup>/container-init/<unit>/
-// once per unit, places the spawned PID (and therefore its descendants
-// via inheritance) into that cgroup, and on shutdown writes 1 to
-// cgroup.kill to take everything out atomically.
+// once per unit, and the supervisor spawns the unit's process directly
+// into it (clone3 with CLONE_INTO_CGROUP; Place is the fallback for
+// kernels without it), so its descendants inherit the cgroup. On
+// shutdown it writes 1 to cgroup.kill to take everything out atomically.
 //
 // Falls back to a no-op manager when cgroup-v2 is not mounted or not
 // writable here -- the supervisor then relies on the legacy SIGTERM
