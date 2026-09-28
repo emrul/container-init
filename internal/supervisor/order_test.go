@@ -136,3 +136,14 @@ func TestBeforeComposesWithAfter(t *testing.T) {
 		t.Errorf("got %v, want window-manager < accessibility < custom-startup", names)
 	}
 }
+
+func TestRequiresIsNotAnOrdering(t *testing.T) {
+	// "a Requires= b" plus "a Before= b" is valid in systemd: b needs a
+	// pulled in, and a must be up first. With Requires= counted as an
+	// edge it was a cycle and the whole unit set was rejected.
+	a := &unit.Unit{Name: "a.service", Requires: []string{"b.service"}, Before: []string{"b.service"}}
+	names := order(t, units(a, u("b.service")))
+	if indexOf(t, names, "a.service") > indexOf(t, names, "b.service") {
+		t.Errorf("Before= did not order a first: got %v", names)
+	}
+}

@@ -17,6 +17,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -158,18 +159,20 @@ func (s *Supervisor) settle(name string, failed bool) bool {
 	return true
 }
 
-// waitDeps blocks until every unit listed in u.After / u.Requires has
-// settled (or the supervisor is stopping). Wants= is a soft hint per
-// systemd convention; we don't block on it.
+// waitDeps blocks until every unit listed in u.After has settled (or
+// the supervisor is stopping). Only ordering dependencies block:
+// Requires= and Wants= alone start in parallel with the unit, as in
+// systemd.
 //
 // A dependency that failed releases units that only order After= it,
-// matching systemd; a unit that Requires= it must not start, and
-// waitDeps returns ok=false with failedDep naming it. ok=false with an
-// empty failedDep means the supervisor stopped first.
+// matching systemd. A unit that both Requires= and is ordered After= it
+// must not start, and waitDeps returns ok=false with failedDep naming
+// it. A Requires= without After= does not stop the unit: by the time
+// the requirement fails the unit may already be running, which is
+// systemd's rule too. ok=false with an empty failedDep means the
+// supervisor stopped first.
 func (s *Supervisor) waitDeps(u *unit.Unit) (failedDep string, ok bool) {
-	deps := append([]string(nil), u.After...)
-	deps = append(deps, u.Requires...)
-	for _, name := range deps {
+	for _, name := range u.After {
 		s.mu.Lock()
 		ch, known := s.ready[name]
 		s.mu.Unlock()
@@ -185,7 +188,7 @@ func (s *Supervisor) waitDeps(u *unit.Unit) (failedDep string, ok bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, name := range u.Requires {
-		if s.failed[name] {
+		if s.failed[name] && slices.Contains(u.After, name) {
 			return name, false
 		}
 	}
@@ -630,7 +633,7 @@ func (s *Supervisor) driveNative(sock *unit.Unit, bound *socketact.Bound) {
 	if err := waitReadable(int(bound.File.Fd()), s.stopCh); err != nil {
 		return
 	}
-	// Honour the helper service's After= / Requires= before its first
+	// Honour the helper service's After= before its first
 	// spawn -- the socket has been listening since Pass 1, so a client
 	// may have queued bytes already; we still don't exec the helper
 	// until prerequisite oneshot units have completed.

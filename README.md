@@ -39,8 +39,8 @@ The [PID 1 problems](https://github.com/gdraheim/docker-systemctl-replacement#pr
 |---|---|
 | **Zombie accumulation** | `internal/pid1` owns a dedicated SIGCHLD-driven `wait4(-1)` loop. Every reparented grandchild -- from `dbus-launch`, `Type=forking` units, or any process that re-parents onto PID 1 -- is reaped silently and immediately. |
 | **SIGTERM not reaching children** | `docker stop` sends SIGTERM to PID 1; the dispatcher forwards it to every supervised child before the stop timeout expires. |
-| **Unordered / incomplete shutdown** | Reverse-dependency shutdown tears services down in reverse `After=` / `Requires=` order, giving each its `TimeoutStopSec` before SIGKILL. |
-| **Service startup at boot** | The supervisor reads unit files and starts all services at launch, respecting `After=` / `Requires=` ordering -- no bespoke shell scripts needed. |
+| **Unordered / incomplete shutdown** | Reverse-dependency shutdown tears services down in reverse `After=` / `Before=` order, giving each its `TimeoutStopSec` before SIGKILL. |
+| **Service startup at boot** | The supervisor reads unit files and starts all services at launch, respecting `After=` / `Before=` ordering and `Requires=` -- no bespoke shell scripts needed. |
 
 ## Layout
 
@@ -224,17 +224,24 @@ file + section + directive (default) or fail-fast (`--strict-units`).
 
 Drop-ins participate in the supervisor's full lifecycle:
 
-- **After= / Requires= / Before=** -- start ordering. `Before=X` is
+- **After= / Before=** -- start ordering. `Before=X` is
   folded into `X`'s `After=` when units are loaded, so it orders the
   boot sequence *and* blocks the target at run time, and it composes
   with an `After=` the target declares itself. Ordering a drop-in ahead
   of a core unit -- the usual reason to reach for it -- therefore needs
   no override of that core unit.
+- **Requires=** -- a requirement, not an ordering, as in systemd. On
+  its own it does not make a unit wait: `A Requires=B` starts A and B
+  in parallel, and `A Requires=B` with `A Before=B` starts A first. Pair
+  it with `After=` to wait for the requirement, which is almost always
+  what you want.
 - **Failed dependencies** -- a unit fails when it cannot be started
   (bad `EnvironmentFile=`, unresolvable `User=`, `fork/exec` error) or
   is a oneshot that exits non-zero, and its `Restart=` policy gives up.
   Units that only order `After=` it then start anyway; units that
-  `Requires=` it are not started and fail in turn, as in systemd. Each
+  both `Requires=` it and order `After=` it are not started and fail in
+  turn, as in systemd. A unit that `Requires=` it without `After=` has
+  not waited for it and is not stopped by the failure. Each
   step logs a line (`failed to start`, `failed`, `not started: required
   unit X failed`). A dependency failure does not fire the dependent's
   own `OnFailure=` / `ExitContainerOnFailure=`.
@@ -243,7 +250,7 @@ Drop-ins participate in the supervisor's full lifecycle:
   first and each restart; a unit that would start more than
   `StartLimitBurst=` times within `StartLimitIntervalSec=` is not
   started again and fails (`OnFailure=` / `ExitContainerOnFailure=`
-  fire, `Requires=` dependents fail if it never became ready). The
+  fire, `Requires=` + `After=` dependents fail if it never became ready). The
   limit directives belong in `[Unit]`, as in systemd, and are also
   accepted in `[Service]`. Setting one alone gets systemd's default
   for the other (5 starts / 10s), and `0` in either disables the

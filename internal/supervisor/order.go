@@ -11,7 +11,7 @@ import (
 //
 // Doing it as a rewrite rather than as extra edges inside topoSort is
 // deliberate. topoSort fixes only the order of the start *list*; what actually
-// blocks a unit at run time is waitDeps, which reads After= and Requires=.
+// blocks a unit at run time is waitDeps, which reads After=.
 // Teaching topoSort about Before= on its own would produce ordering that looks
 // right in the boot trace and still races in practice -- strictly worse than
 // not supporting the directive, because it would look supported.
@@ -48,7 +48,12 @@ func resolveBefore(units []*unit.Unit) {
 }
 
 // topoSort returns units in start order: dependencies before dependents.
-// After= and Requires= both contribute edges. Cycles are reported.
+// Only ordering dependencies contribute edges. Cycles are reported.
+//
+// Requires= is a requirement, not an ordering: as in systemd, "A Requires=B"
+// without "A After=B" starts both in parallel, and "A Requires=B" with
+// "A Before=B" is valid and starts A first. Treating it as an edge made that
+// second case a cycle.
 //
 // Before= does not contribute edges here: resolveBefore has already folded it
 // into the target's After=.
@@ -75,9 +80,6 @@ func topoSort(units []*unit.Unit) ([]*unit.Unit, error) {
 	}
 	for _, u := range units {
 		for _, dep := range u.After {
-			addEdge(dep, u.Name)
-		}
-		for _, dep := range u.Requires {
 			addEdge(dep, u.Name)
 		}
 	}
