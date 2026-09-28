@@ -230,6 +230,14 @@ Drop-ins participate in the supervisor's full lifecycle:
   with an `After=` the target declares itself. Ordering a drop-in ahead
   of a core unit -- the usual reason to reach for it -- therefore needs
   no override of that core unit.
+- **Failed dependencies** -- a unit fails when it cannot be started
+  (bad `EnvironmentFile=`, unresolvable `User=`, `fork/exec` error) or
+  is a oneshot that exits non-zero, and its `Restart=` policy gives up.
+  Units that only order `After=` it then start anyway; units that
+  `Requires=` it are not started and fail in turn, as in systemd. Each
+  step logs a line (`failed to start`, `failed`, `not started: required
+  unit X failed`). A dependency failure does not fire the dependent's
+  own `OnFailure=` / `ExitContainerOnFailure=`.
 - **Restart= / RestartSec= / StartLimitBurst= / StartLimitIntervalSec=** --
   per-unit restart policy and rate limiting.
 - **ConditionPathExists= / ConditionPathExistsGlob= / ConditionEnvironment=** --

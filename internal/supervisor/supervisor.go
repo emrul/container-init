@@ -11,6 +11,7 @@
 package supervisor
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -52,6 +53,10 @@ type Supervisor struct {
 	// successful exec; for sockets that's post-bind; for skipped
 	// units that's immediately on Run() entry. See signalReady.
 	ready map[string]chan struct{}
+	// failed records units whose ready channel was closed by
+	// markFailed rather than signalReady: they gave up before ever
+	// becoming ready. waitDeps reads it once the channel is closed.
+	failed map[string]bool
 }
 
 type serviceState struct {
@@ -103,50 +108,89 @@ func New(units []*unit.Unit, tracer *trace.Tracer, dispatcher *pid1.Dispatcher, 
 		services:   make(map[string]*serviceState),
 		bounds:     make(map[string]*socketact.Bound),
 		ready:      ready,
+		failed:     make(map[string]bool),
 	}, nil
 }
 
 // signalReady closes the ready channel for unit, unblocking any
 // runService goroutine that's waiting on its After= / Requires=. Safe
-// to call repeatedly -- the close is single-shot via sync.Once
-// underneath.
+// to call repeatedly: the first of signalReady / markFailed to reach a
+// unit settles it and later calls are no-ops.
 func (s *Supervisor) signalReady(name string) {
+	s.settle(name, false)
+}
+
+// markFailed settles a unit that gave up without becoming ready -- it
+// failed to start, or a oneshot exited non-zero, and its Restart=
+// policy will not try again. Dependents are released like signalReady
+// does, but waitDeps fails those that Requires= it. Reports whether
+// the unit was still unsettled; a unit that became ready earlier (a
+// Type=simple that started, then died) is left ready.
+func (s *Supervisor) markFailed(name string) bool {
+	return s.settle(name, true)
+}
+
+func (s *Supervisor) settle(name string, failed bool) bool {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	ch, ok := s.ready[name]
-	s.mu.Unlock()
 	if !ok {
-		return
+		return false
 	}
-	defer func() { _ = recover() }() // close-of-closed-channel is harmless here
 	select {
 	case <-ch:
-		// already closed
+		return false // already settled
 	default:
-		close(ch)
 	}
+	if failed {
+		s.failed[name] = true
+	}
+	close(ch)
+	return true
 }
 
 // waitDeps blocks until every unit listed in u.After / u.Requires has
-// signalled ready (or the supervisor is stopping). Wants= is a soft
-// hint per systemd convention; we don't block on it. Returns false
-// when the supervisor stopped before deps resolved.
-func (s *Supervisor) waitDeps(u *unit.Unit) bool {
+// settled (or the supervisor is stopping). Wants= is a soft hint per
+// systemd convention; we don't block on it.
+//
+// A dependency that failed releases units that only order After= it,
+// matching systemd; a unit that Requires= it must not start, and
+// waitDeps returns ok=false with failedDep naming it. ok=false with an
+// empty failedDep means the supervisor stopped first.
+func (s *Supervisor) waitDeps(u *unit.Unit) (failedDep string, ok bool) {
 	deps := append([]string(nil), u.After...)
 	deps = append(deps, u.Requires...)
 	for _, name := range deps {
 		s.mu.Lock()
-		ch, ok := s.ready[name]
+		ch, known := s.ready[name]
 		s.mu.Unlock()
-		if !ok {
+		if !known {
 			continue // unknown dep -- skip silently (matches addEdge's behaviour in topoSort)
 		}
 		select {
 		case <-ch:
 		case <-s.stopCh:
-			return false
+			return "", false
 		}
 	}
-	return true
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, name := range u.Requires {
+		if s.failed[name] {
+			return name, false
+		}
+	}
+	return "", true
+}
+
+// dependencyFailed records that u will not start because a unit it
+// Requires= failed, and passes the failure on to u's own dependents.
+// As in systemd, this is not a failure of u itself: OnFailure= and
+// ExitContainerOnFailure= do not fire.
+func (s *Supervisor) dependencyFailed(u *unit.Unit, dep string) {
+	log.Printf("unit %s: not started: required unit %s failed", u.Name, dep)
+	s.event(u.Name, "dependency_failed", map[string]any{"dependency": dep})
+	s.markFailed(u.Name)
 }
 
 // Run starts every non-skipped unit and blocks until Stop is invoked
@@ -247,7 +291,10 @@ func (s *Supervisor) Done() <-chan struct{} { return s.doneCh }
 // runService owns one .service's lifecycle when it is not driven by a
 // socket-activation goroutine.
 func (s *Supervisor) runService(u *unit.Unit) {
-	if !s.waitDeps(u) {
+	if dep, ok := s.waitDeps(u); !ok {
+		if dep != "" {
+			s.dependencyFailed(u, dep)
+		}
 		return
 	}
 	first := true
@@ -294,12 +341,15 @@ func (s *Supervisor) runService(u *unit.Unit) {
 			return
 		}
 		if !shouldRestart(u, failed) {
-			// Unblock any dependents that were waiting on a oneshot
-			// that's now done (success or terminal failure) -- without
-			// this, a Type=oneshot Restart=no that ran and exited 0
-			// would not signal because the success-signal above
-			// flipped first=false; that's fine. Failed oneshots stay
-			// unsignalled deliberately.
+			// Giving up. A unit that never became ready (a oneshot
+			// that exited non-zero, or any unit that could not be
+			// started) settles as failed so its dependents are
+			// released or failed rather than waiting forever.
+			// A start failure has already logged its cause.
+			var se *startError
+			if failed && s.markFailed(u.Name) && !errors.As(exitErr, &se) {
+				log.Printf("unit %s: failed: %v", u.Name, exitErr)
+			}
 			return
 		}
 		if u.RestartSec > 0 {
@@ -342,7 +392,7 @@ func (s *Supervisor) fireOnFailure(name string) {
 // process to exit.
 func (s *Supervisor) spawnAndWait(u *unit.Unit, extra *socketact.Bound, onSpawned func()) error {
 	if len(u.ExecStart) == 0 {
-		return fmt.Errorf("unit %s: empty ExecStart", u.Name)
+		return s.startFailed(u, fmt.Errorf("empty ExecStart"))
 	}
 	cmd := exec.Command(u.ExecStart[0], u.ExecStart[1:]...)
 	// Build env in systemd's documented precedence:
@@ -358,7 +408,7 @@ func (s *Supervisor) spawnAndWait(u *unit.Unit, extra *socketact.Bound, onSpawne
 			if os.IsNotExist(err) && ef.IgnoreMissing {
 				continue
 			}
-			return fmt.Errorf("unit %s: env file %s: %w", u.Name, ef.Path, err)
+			return s.startFailed(u, fmt.Errorf("env file %s: %w", ef.Path, err))
 		}
 		cmd.Env = append(cmd.Env, entries...)
 	}
@@ -380,7 +430,7 @@ func (s *Supervisor) spawnAndWait(u *unit.Unit, extra *socketact.Bound, onSpawne
 	if u.User != "" {
 		id, err := userdb.Resolve(u.User, u.Group, "")
 		if err != nil {
-			return fmt.Errorf("unit %s: privilege drop: %w", u.Name, err)
+			return s.startFailed(u, fmt.Errorf("privilege drop: %w", err))
 		}
 		applyCredential(cmd.SysProcAttr, id.UID, id.GID, id.SupplementaryGroups)
 		// Replace HOME / USER / LOGNAME with the resolved identity's
@@ -397,7 +447,7 @@ func (s *Supervisor) spawnAndWait(u *unit.Unit, extra *socketact.Bound, onSpawne
 
 	if extra != nil {
 		if err := socketact.PrepareNative(cmd, extra); err != nil {
-			return err
+			return s.startFailed(u, err)
 		}
 	}
 
@@ -414,7 +464,7 @@ func (s *Supervisor) spawnAndWait(u *unit.Unit, extra *socketact.Bound, onSpawne
 	pid, exitCh, err := s.dispatcher.Spawn(cmd)
 	if err != nil {
 		invokePhase.EndStatus("error", map[string]any{"unit": u.Name, "err": err.Error()})
-		return fmt.Errorf("start %s: %w", u.Name, err)
+		return s.startFailed(u, err)
 	}
 	invokePhase.End(map[string]any{"unit": u.Name, "pid": pid})
 	if label := trace.PostSpawnLabel(s.postLabels, u.Name); label != "" {
@@ -523,7 +573,11 @@ func (s *Supervisor) driveNative(sock *unit.Unit, bound *socketact.Bound) {
 	// spawn -- the socket has been listening since Pass 1, so a client
 	// may have queued bytes already; we still don't exec the helper
 	// until prerequisite oneshot units have completed.
-	if !s.waitDeps(svc) {
+	if dep, ok := s.waitDeps(svc); !ok {
+		if dep != "" {
+			log.Printf("unit %s: not started: required unit %s failed", svc.Name, dep)
+			s.event(svc.Name, "dependency_failed", map[string]any{"dependency": dep})
+		}
 		return
 	}
 	s.event(sock.Name, "first_connect", nil)
@@ -604,8 +658,12 @@ func (s *Supervisor) driveProxy(sock *unit.Unit, bound *socketact.Bound) {
 // spawnAndWait returns so the proxy goroutine can begin dialing the
 // private endpoint (with retry).
 func (s *Supervisor) runHelperLoop(svc *unit.Unit, helperUp chan struct{}) {
-	if !s.waitDeps(svc) {
-		close(helperUp) // unblock the accept loop; it will see stopCh next
+	if dep, ok := s.waitDeps(svc); !ok {
+		if dep != "" {
+			log.Printf("unit %s: not started: required unit %s failed", svc.Name, dep)
+			s.event(svc.Name, "dependency_failed", map[string]any{"dependency": dep})
+		}
+		close(helperUp) // unblock the accept loop
 		return
 	}
 	first := true
@@ -727,6 +785,27 @@ func (s *Supervisor) shutdown() int {
 	}
 	return exit
 }
+
+// startFailed logs a unit whose ExecStart could not be started (bad
+// environment file, unresolvable User=, fork/exec error) and returns
+// the error for the caller's restart / failure handling. These never
+// produce child output, so without this line the container log would
+// show nothing at all.
+func (s *Supervisor) startFailed(u *unit.Unit, err error) error {
+	log.Printf("unit %s: failed to start: %v", u.Name, err)
+	s.event(u.Name, "start_failed", map[string]any{"err": err.Error()})
+	return &startError{unit: u.Name, err: err}
+}
+
+// startError is a failure to start a unit, as opposed to a unit that
+// ran and exited non-zero.
+type startError struct {
+	unit string
+	err  error
+}
+
+func (e *startError) Error() string { return "start " + e.unit + ": " + e.err.Error() }
+func (e *startError) Unwrap() error { return e.err }
 
 func (s *Supervisor) event(unitName, phase string, fields map[string]any) {
 	if s.tracer == nil {
