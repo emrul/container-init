@@ -21,7 +21,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -65,9 +64,10 @@ type Supervisor struct {
 	// limits holds each unit's start-limit state, shared by every path
 	// that starts it; see allowStart.
 	limits map[string]*startLimiter
-	// cgroupAfterSpawn is set once clone3(CLONE_INTO_CGROUP) has been
-	// refused; spawns then move the child into its cgroup afterwards.
-	cgroupAfterSpawn atomic.Bool
+	// cgroupProbe decides, once, whether children can be spawned
+	// straight into their cgroup; see canSpawnIntoCgroup.
+	cgroupProbe       sync.Once
+	spawnIntoCgroupOK bool
 	// wrapper is the program every spawn execs first (see execwrap):
 	// container-init's own binary, which then chdirs and execs the
 	// service. A field so tests can substitute a copy other users can
@@ -572,7 +572,7 @@ func (s *Supervisor) spawnAndWait(u *unit.Unit, extra *socketact.Bound, onSpawne
 	if s.cgroup.Available() {
 		if dir, err := s.cgroup.Mkdir(u.Name); err != nil {
 			log.Printf("cgroup mkdir %s: %v (falling back to PGID kill path)", u.Name, err)
-		} else if !s.cgroupAfterSpawn.Load() {
+		} else if s.canSpawnIntoCgroup() {
 			f, err := os.Open(dir)
 			if err != nil {
 				log.Printf("cgroup open %s: %v (placing after spawn)", dir, err)
@@ -587,17 +587,6 @@ func (s *Supervisor) spawnAndWait(u *unit.Unit, extra *socketact.Bound, onSpawne
 	s.event(u.Name, "spawn", map[string]any{"argv": u.ExecStart})
 	invokePhase := s.tracer.Begin(trace.PhaseFromUnitName(u.Name))
 	pid, exitCh, err := s.dispatcher.Spawn(cmd)
-	if err != nil && placed && cloneIntoCgroupUnsupported(err) {
-		// The kernel (before 5.7) or a seccomp filter refused clone3
-		// with CLONE_INTO_CGROUP. Fall back to moving each child after
-		// spawn, which leaves a window where an early fork escapes.
-		if !s.cgroupAfterSpawn.Swap(true) {
-			log.Printf("cgroup: cannot spawn into a cgroup (%v); moving units into their cgroup after spawn", err)
-		}
-		cmd = cmdWithoutCgroup(cmd)
-		placed = false
-		pid, exitCh, err = s.dispatcher.Spawn(cmd)
-	}
 	// The child holds its own copy of the write end; ours must go so
 	// the read below sees EOF when the service execs.
 	statusW.Close()
@@ -1045,22 +1034,52 @@ func credentialPlan(euid, egid uint32, id userdb.Identity) (switchID bool, err e
 		id.UID, id.GID, euid, egid)
 }
 
-// cmdWithoutCgroup returns a fresh, unstarted copy of cmd (an exec.Cmd
-// cannot be started twice) that does not ask to be spawned into a
-// cgroup.
-func cmdWithoutCgroup(cmd *exec.Cmd) *exec.Cmd {
-	attr := *cmd.SysProcAttr
-	spawnIntoCgroup(&attr, -1)
-	return &exec.Cmd{
-		Path:        cmd.Path,
-		Args:        cmd.Args,
-		Env:         cmd.Env,
-		Dir:         cmd.Dir,
-		Stdout:      cmd.Stdout,
-		Stderr:      cmd.Stderr,
-		ExtraFiles:  cmd.ExtraFiles,
-		SysProcAttr: &attr,
+// canSpawnIntoCgroup reports whether spawns can use
+// clone3(CLONE_INTO_CGROUP), deciding it once with a probe spawn. Kernels
+// before 5.7 lack it, and seccomp profiles can refuse clone3 with
+// whatever errno they choose (Docker's default answers ENOSYS, others
+// EPERM). Telling that apart from a unit's own spawn failure by errno is
+// not possible -- a credential switch that fails in the child is EPERM
+// too -- so the probe spawns container-init's own binary into a scratch
+// cgroup with no credentials, and any failure means the fallback: move
+// each child into its cgroup after spawn, which leaves a window where an
+// early fork escapes.
+func (s *Supervisor) canSpawnIntoCgroup() bool {
+	s.cgroupProbe.Do(func() {
+		if err := s.probeSpawnIntoCgroup(); err != nil {
+			log.Printf("cgroup: cannot spawn into a cgroup (%v); moving units into their cgroup after spawn", err)
+			return
+		}
+		s.spawnIntoCgroupOK = true
+	})
+	return s.spawnIntoCgroupOK
+}
+
+func (s *Supervisor) probeSpawnIntoCgroup() error {
+	const name = "spawn-probe" // no unit suffix, so no unit can share it
+	dir, err := s.cgroup.Mkdir(name)
+	if err != nil {
+		return err
 	}
+	defer s.cgroup.Remove(name)
+	f, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	cmd := exec.Command(s.wrapper, execwrap.ProbeArg)
+	cmd.Dir = "/"
+	cmd.SysProcAttr = procAttr()
+	spawnIntoCgroup(cmd.SysProcAttr, int(f.Fd()))
+	_, exitCh, err := s.dispatcher.Spawn(cmd)
+	if err != nil {
+		return err
+	}
+	_ = cmd.Process.Release()
+	if err := (<-exitCh).AnyError(); err != nil {
+		return fmt.Errorf("probe: %w", err)
+	}
+	return nil
 }
 
 // startFailed logs a unit whose ExecStart could not be started (bad

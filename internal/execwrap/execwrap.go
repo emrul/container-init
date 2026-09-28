@@ -26,6 +26,11 @@ import (
 // Arg is os.Args[1] when a process should act as the wrapper.
 const Arg = "__exec"
 
+// ProbeArg is os.Args[1] for a process that should just exit 0: the
+// supervisor spawns one to find out whether it can spawn into a cgroup,
+// without depending on any other program being installed.
+const ProbeArg = "__probe"
+
 // Exit statuses when the wrapper fails, systemd's values from
 // systemd.exec(5) "Process Exit Codes".
 const (
@@ -40,10 +45,14 @@ func Argv(statusFD int, dir, path string, argv []string) []string {
 	return append([]string{"container-init", Arg, strconv.Itoa(statusFD), dir, path, "--"}, argv...)
 }
 
-// Main runs the wrapper and does not return when os.Args[1] is Arg.
+// Main runs the wrapper and does not return when os.Args[1] is Arg or
+// ProbeArg.
 // Otherwise it returns at once. Call it first thing in main, and in
 // TestMain of any package whose tests spawn services.
 func Main() {
+	if len(os.Args) >= 2 && os.Args[1] == ProbeArg {
+		os.Exit(0)
+	}
 	if len(os.Args) < 2 || os.Args[1] != Arg {
 		return
 	}

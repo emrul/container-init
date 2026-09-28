@@ -21,8 +21,6 @@ func applyCredential(attr *syscall.SysProcAttr, uid, gid uint32, groups []uint32
 
 func spawnIntoCgroup(attr *syscall.SysProcAttr, fd int) {}
 
-func cloneIntoCgroupUnsupported(err error) bool { return false }
-
 func killGroup(pid int, sig syscall.Signal) error {
 	return syscall.Kill(-pid, sig)
 }
