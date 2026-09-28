@@ -214,9 +214,16 @@ func (s *Supervisor) Run() int {
 	// Pass 1: bind every .socket whose conditions allow. Skipped
 	// sockets (and their attached services) immediately signal ready
 	// so dependents that After= / Requires= them don't block forever.
+	// A socket whose service is skipped is skipped too: binding it
+	// would let the first client start a service whose conditions
+	// said no (Pass 2 logs the service's own skip).
 	for _, u := range s.units {
 		if u.Kind != unit.KindSocket {
 			continue
+		}
+		if svc, ok := s.byName[u.Service]; ok && svc.Condition.Skip && !u.Condition.Skip {
+			u.Condition.Skip = true
+			u.Condition.Reason = fmt.Sprintf("service %s skipped", svc.Name)
 		}
 		if u.Condition.Skip {
 			log.Printf("unit %s: skipped (%s)", u.Name, u.Condition.Reason)

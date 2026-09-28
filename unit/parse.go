@@ -287,6 +287,12 @@ func (l *loader) applyUnitSection(u *Unit, name, value string) error {
 		u.ConditionPathExistsGlob = append(u.ConditionPathExistsGlob, value)
 	case "ConditionEnvironment":
 		u.ConditionEnvironment = append(u.ConditionEnvironment, value)
+	case "ConditionUser":
+		if strings.HasPrefix(strings.TrimPrefix(value, "!"), "@") {
+			l.warn("Unit", name, fmt.Sprintf("%q is not supported, only a uid or user name (ignored)", value))
+			return nil
+		}
+		u.ConditionUser = append(u.ConditionUser, value)
 	case "OnFailure":
 		u.OnFailure = append(u.OnFailure, splitWords(value)...)
 	default:

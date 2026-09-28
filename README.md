@@ -240,8 +240,16 @@ Drop-ins participate in the supervisor's full lifecycle:
   own `OnFailure=` / `ExitContainerOnFailure=`.
 - **Restart= / RestartSec= / StartLimitBurst= / StartLimitIntervalSec=** --
   per-unit restart policy and rate limiting.
-- **ConditionPathExists= / ConditionPathExistsGlob= / ConditionEnvironment=** --
-  unit is loaded but skipped at boot when conditions are unmet.
+- **ConditionPathExists= / ConditionPathExistsGlob= / ConditionEnvironment= /
+  ConditionUser=** -- unit is loaded but skipped at boot when conditions
+  are unmet. `ConditionUser=` takes a uid or user name, optionally
+  negated with `!`, and compares it with container-init's own uid --
+  e.g. `ConditionUser=root` for a unit that needs a root PID 1,
+  `ConditionUser=!root` for one that only makes sense without it. Names
+  resolve at load time, before any unit runs; `root` needs no passwd
+  entry. systemd's `@system` is not supported.
+  A `.socket` whose service is skipped is skipped with it and does not
+  listen, so a client cannot start a service its conditions ruled out.
 - **OnFailure=** -- invoke a sibling oneshot when this unit's restart
   policy is exhausted; chains across the core/drop-in boundary
   identically.

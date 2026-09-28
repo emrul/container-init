@@ -128,6 +128,20 @@ func Resolve(user, group, homeOverride string) (Identity, error) {
 	return id, nil
 }
 
+// UID resolves a user given as a numeric id or a name to its uid.
+// Unlike Resolve it reads no group data and needs no passwd entry for a
+// numeric id.
+func UID(user string) (uint32, error) {
+	if uid, err := strconv.ParseUint(user, 10, 32); err == nil {
+		return uint32(uid), nil
+	}
+	e, err := lookupPasswdByName(user)
+	if err != nil {
+		return 0, fmt.Errorf("userdb: user %q: %w", user, err)
+	}
+	return e.uid, nil
+}
+
 type passwdEntry struct {
 	name string
 	uid  uint32

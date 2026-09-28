@@ -5,6 +5,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/emrul/container-init/internal/userdb"
+)
+
+// ConditionUser= inputs, as vars so tests can substitute them.
+var (
+	conditionEUID = os.Geteuid
+	lookupUID     = userdb.UID
 )
 
 // validate runs the cross-directive constraint rules that can't be
@@ -69,6 +77,27 @@ func evaluateConditions(u *Unit, lookup Lookup) {
 		if got != want {
 			u.Condition.Skip = true
 			u.Condition.Reason = fmt.Sprintf("ConditionEnvironment=%s (have %q, want %q)", e, got, want)
+			return
+		}
+	}
+	for _, c := range u.ConditionUser {
+		// systemd's ConditionUser=: container-init's own uid is the
+		// given uid or user name, or with a "!" prefix is not. Names
+		// resolve now, at load time, before any unit has run.
+		want, negate := c, false
+		if strings.HasPrefix(want, "!") {
+			want, negate = want[1:], true
+		}
+		euid := uint32(conditionEUID())
+		var match bool
+		if want == "root" {
+			match = euid == 0 // needs no passwd entry
+		} else if uid, err := lookupUID(want); err == nil {
+			match = euid == uid
+		}
+		if match == negate {
+			u.Condition.Skip = true
+			u.Condition.Reason = fmt.Sprintf("ConditionUser=%s unmet (running as uid %d)", c, euid)
 			return
 		}
 	}

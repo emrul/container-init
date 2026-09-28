@@ -111,6 +111,7 @@ type Unit struct {
 	ConditionPathExists     []string
 	ConditionPathExistsGlob []string
 	ConditionEnvironment    []string // each entry is "VAR=value" or "VAR"
+	ConditionUser           []string // uid or user name, optional "!" prefix
 	OnFailure               []string
 
 	// [Service]

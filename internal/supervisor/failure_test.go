@@ -3,6 +3,7 @@
 package supervisor
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -139,5 +140,65 @@ func TestNonRootUserUnits(t *testing.T) {
 	defer sup.mu.Unlock()
 	if sup.failed["same.service"] || !sup.failed["other.service"] {
 		t.Errorf("failed = %v, want only other.service", sup.failed)
+	}
+}
+
+// TestSkippedServiceSocketNotBound: a socket must not listen for a
+// service whose conditions skipped it, in either activation mode --
+// otherwise the first client would start it anyway.
+func TestSkippedServiceSocketNotBound(t *testing.T) {
+	for _, mode := range []unit.ActivationMode{unit.ActivationNative, unit.ActivationProxy} {
+		t.Run(mode.String(), func(t *testing.T) {
+			dir := t.TempDir()
+			sockPath := filepath.Join(dir, "sock")
+			mark := filepath.Join(dir, "ran")
+			sock := &unit.Unit{
+				Name:           "gated.socket",
+				Kind:           unit.KindSocket,
+				ListenStream:   []unit.Listener{{Network: "unix", Address: sockPath}},
+				ActivationMode: mode,
+				Service:        "gated.service",
+			}
+			if mode == unit.ActivationProxy {
+				sock.ProxyTarget = filepath.Join(dir, "private")
+			}
+			svc := &unit.Unit{
+				Name:      "gated.service",
+				Kind:      unit.KindService,
+				Type:      unit.TypeSimple,
+				ExecStart: []string{"/bin/touch", mark},
+				Condition: unit.Condition{Skip: true, Reason: "ConditionUser=root unmet"},
+			}
+
+			d := pid1.NewDispatcher()
+			dispStop := make(chan struct{})
+			defer close(dispStop)
+			d.Start(dispStop)
+
+			sup, err := New([]*unit.Unit{sock, svc}, nil, d, &cgroup.Manager{})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			runDone := make(chan struct{})
+			go func() { sup.Run(); close(runDone) }()
+			defer func() {
+				sup.Stop()
+				<-runDone
+			}()
+
+			select {
+			case <-sup.ready["gated.service"]:
+			case <-time.After(5 * time.Second):
+				t.Fatal("gated.service never settled")
+			}
+			if c, err := net.Dial("unix", sockPath); err == nil {
+				c.Close()
+				t.Error("socket of a skipped service is listening")
+			}
+			time.Sleep(100 * time.Millisecond)
+			if _, err := os.Stat(mark); err == nil {
+				t.Error("skipped service ran")
+			}
+		})
 	}
 }

@@ -189,6 +189,7 @@ Wants=netwait.service
 ConditionPathExists=/etc/passwd
 ConditionPathExistsGlob=/dev/dri/*
 ConditionEnvironment=FEATURE_X=1
+ConditionUser=!root
 OnFailure=drain.service
 
 [Service]
@@ -254,6 +255,9 @@ Service=wide.service
 	}
 	if got, want := svc.ConditionPathExistsGlob, []string{"/dev/dri/*"}; !sliceEq(got, want) {
 		t.Errorf("ConditionPathExistsGlob = %v, want %v", got, want)
+	}
+	if got, want := svc.ConditionUser, []string{"!root"}; !sliceEq(got, want) {
+		t.Errorf("ConditionUser = %v, want %v", got, want)
 	}
 	// [Service] checks
 	if svc.Type != TypeForking {
