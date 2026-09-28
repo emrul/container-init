@@ -427,12 +427,51 @@ The kernel still checks `WorkingDirectory=` as the user, because the
 wrapper already runs with the user's credentials when it calls
 `chdir`.
 
-(Holding the dispatcher lock across `cmd.Start` is also a latent
-problem for system units, where the paths are image-controlled rather
-than user-controlled. A follow-up can drop the lock around `Start`: the
-reaper keeps the exit status of any PID it reaps with no registered
-consumer while a spawn is in flight, and `Spawn` claims it after
-`Start` returns.)
+**The dispatcher lock stays; `Start` becomes bounded instead.**
+Holding the dispatcher lock across `cmd.Start` is what makes
+registration safe: the reaper cannot `wait4` a child until `Spawn` has
+recorded which consumer it belongs to, so every exit status reaches the
+spawn that created that process. Dropping the lock and buffering the
+statuses of unregistered PIDs would break that. Once a process is
+reaped its PID can be reused, so two concurrent spawns could claim each
+other's buffered status by number, and a spawn that never returns would
+keep the "buffer every unknown exit" window open for good, collecting
+the statuses of every orphan reparented to PID 1 in the meantime.
+
+The real problem is only that `Start` can block for as long as the
+child's pre-exec steps take, and those steps include `chdir` and the
+`execve` of a path that may sit on a hung mount. The fix is to make sure
+no path outside PID 1's control is touched between fork and exec, for
+every spawn:
+
+- system units get the same treatment as user units: PID 1 spawns
+  `/proc/self/exe __exec` with `cmd.Dir = "/"`, and the wrapper does
+  `chdir(WorkingDirectory=)` and the `execve` of `ExecStart=` itself,
+  after `Spawn` has returned and released the lock (the wrapper runs as
+  root, or as the unit's `User=`, as the service would);
+- the only things between fork and exec are then credential setup,
+  `CLONE_INTO_CGROUP`, and the exec of PID 1's own binary: kernel work
+  on objects PID 1 owns, which cannot wait on a user's or an image's
+  filesystem.
+
+`Spawn` keeps its contract (register the PID under the same lock as the
+fork) and the reaper keeps reaping everything with `wait4(-1)`.
+
+Tests for this, in the system-supervisor fix:
+
+- a unit whose `WorkingDirectory=` blocks (a test hook in the wrapper
+  that blocks before `chdir`, standing in for a hung mount) while other
+  units spawn, exit and are reaped normally, and while stop still
+  kills it;
+- many concurrent spawns of commands that exit immediately, each
+  checking it received its own exit status (distinct exit codes);
+- orphan churn: a unit that continuously double-forks short-lived
+  grandchildren, which PID 1 reaps as unknown PIDs, while other units
+  spawn and exit, with every registered exit delivered to the right
+  consumer;
+- PID reuse: exhaust a small `pid_max` range in a PID namespace (the
+  test runs as PID 1 of its own namespace) so PIDs recycle while spawns
+  and orphan reaping continue, with the same delivery checks.
 
 PID 1 parses what the load helper returns with the same `unit/` parser
 and applies the user-scope policy itself. The helper's output is
@@ -477,18 +516,32 @@ can sit on a FUSE or NFS mount that never answers. Both would stall PID
   managers (default 4), so a boot with many opted-in users cannot fork
   a helper per user at once.
 
-  A slot is released when the helper process has been *reaped*, not
-  when its deadline passes. A helper stuck in an uninterruptible sleep
-  on a hung mount survives `cgroup.kill` until the kernel lets it go,
-  so releasing its slot on timeout would let repeated
-  `daemon-reload`s pile up blocked processes without limit. On timeout
-  the run fails and the caller gets its answer, but the slot stays
-  held by the unreaped helper. When a manager's slot or the global
-  slots are all held, new requests are rejected immediately with an
-  error naming the stuck helper (`daemon-reload`, `enable` and `disable` return a D-Bus error that
-  `systemctl` prints; a manager starting at boot starts with no units
-  and logs why) rather than
-  queued behind it. The same accounting covers `__probe`.
+  Helpers are in one of two states, and they are counted separately:
+
+  - **Running** (within their deadline). These hold the concurrency
+    slots. A request that finds its manager's slot or all global slots
+    held by running helpers *waits* in a FIFO queue; the time spent
+    queued counts toward the request's own deadline. This is the normal
+    case: a fifth opted-in user at boot waits a moment for one of the
+    four loads ahead of it, it does not start empty.
+  - **Stuck** (past their deadline, killed, not yet reaped). A helper
+    in an uninterruptible sleep on a hung mount survives `cgroup.kill`
+    until the kernel lets it go. On timeout the run fails and the
+    caller gets its answer, and the helper moves from its concurrency
+    slot to the stuck set. It stays charged there until it is
+    *reaped*, never released on timeout, so repeated `daemon-reload`s
+    cannot pile up blocked processes.
+
+  Admission rejects a request immediately, rather than queueing it,
+  only because of stuck helpers: when the requesting manager already
+  has a stuck helper (at most one per manager), or when the global
+  stuck count has reached its cap (default 8). The error names the
+  stuck helper and what it was reading. `daemon-reload`, `enable` and
+  `disable` return it as a D-Bus error that `systemctl` prints; a
+  manager starting at boot starts with no units and logs it. So the
+  number of helper processes is bounded by running slots plus the stuck
+  cap, and healthy load never causes a rejection. The same accounting
+  covers `__probe`.
 
   Exec wrappers are not in these slots: they are the unit's own
   processes. A unit whose cgroup is still populated after `cgroup.kill`
@@ -560,13 +613,28 @@ The runtime model:
    jobs for units that `Requires=` the stopped unit. Boot is a start
    transaction for the enabled set (in user scope,
    `default.target.wants/`).
-2. **Ordering.** Only `After=` and `Before=` edges between jobs *in the
-   same transaction* order them. Edges to units outside it have no
-   effect. For start jobs, `A After=B` means A's job waits for B's job
-   to finish; for stop jobs the order is reversed. A cycle is only
-   among ordering edges; a cycle is reported with the units in it and
-   fails the transaction (systemd tries to break cycles by dropping
-   `Wants=` jobs; v1 does not).
+2. **Ordering.** Only `After=` and `Before=` edges order jobs, and they
+   apply against every job *installed in the manager*, not just the
+   ones from the same transaction. A job is runnable when no unit it is
+   ordered after (for start jobs) or before (for stop jobs) has a
+   pending or running job, which is the check systemd's scheduler makes
+   for each job. So after `systemctl start --no-block B` (a slow
+   oneshot) and a separate `systemctl start A` with `A After=B`, A's job
+   waits for B's. Edges to units with no installed job have no effect:
+   `A After=B` with B inactive and not being started does not start or
+   wait for B. When a job completes, the scheduler re-checks the jobs
+   waiting on it. A cycle is only among ordering edges; it is reported
+   with the units in it and fails the transaction that would create it
+   (systemd tries to break cycles by dropping `Wants=` jobs; v1 does
+   not).
+   **One job per unit.** A unit has at most one installed job. A new
+   job of the same type merges into the installed one (the caller
+   waits for the existing job). A conflicting one in mode `replace`
+   (start while a stop is pending, or stop while a start is pending)
+   cancels the installed job, which completes with `canceled`, and
+   takes its place; a job that is already running is not interrupted
+   mid-exec but finishes its current step first (a stop replacing a
+   running start kills the unit once the start has spawned it).
 3. **Failure propagation.** If B's start job fails and A `Requires=B`,
    A's job fails with `dependency` only if A is also ordered after B.
    Without ordering, A has already been started in parallel and stays
@@ -585,6 +653,15 @@ in the Phase 0 environment:
 - `A After=B` with nothing pulling B in: A starts without waiting.
 - `A After=B`, `B After=A`, both in one transaction: rejected as a
   cycle naming A and B.
+- `systemctl start --no-block B` (B a slow oneshot), then
+  `systemctl start A` with only `A After=B`: A's job waits until B's
+  finishes.
+- `systemctl start A` while `systemctl stop B` is pending, `A After=B`:
+  A's job waits for the stop job, then starts.
+- `systemctl stop A` while A's start job is still waiting on an ordering
+  dependency: the start job completes `canceled`, the stop job runs.
+- `systemctl start A` twice in quick succession: one start, both callers
+  get the same job result.
 
 (This is also a bug in the system supervisor today. It is one of the
 existing-behaviour fixes listed under [Open questions](#open-questions).)
@@ -844,8 +921,11 @@ unit directory as that user.
    `EnvironmentFile=` (systemd has it the other way round); a service
    can fork before it is moved into its cgroup; `Requires=` is treated
    as an ordering edge, so `Requires=` plus `Before=` on the same unit
-   is rejected as a cycle; and the dispatcher lock is held across
-   `cmd.Start`. The first, second and fourth change behaviour for
+   is rejected as a cycle; and `cmd.Start` can block on image paths
+   (`WorkingDirectory=`, `ExecStart=`) while the dispatcher lock is
+   held. The fix for the last one is the trusted exec wrapper, not
+   dropping the lock (see
+   [The user-side helper](#the-user-side-helper)). The first, second and fourth change behaviour for
    existing images, so each wants its own change and release note.
 5. **Session bus without the shim.** If the image runs a session
    `dbus-daemon` but not the shim, should the user manager also claim
