@@ -1,6 +1,7 @@
 package supervisor
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -9,8 +10,8 @@ import (
 )
 
 // orderUnits returns units in start order, or the reason they cannot be
-// ordered. It is the check New makes before anything starts, and the one
-// CheckOrder makes for --validate.
+// ordered: the ordering part of checkUnits, which New makes before
+// anything starts and Check makes for --validate.
 //
 // Before= is folded into the target's After= first, in place, so that
 // both topoSort and waitDeps honour it without either needing to know it
@@ -20,15 +21,78 @@ func orderUnits(units []*unit.Unit) ([]*unit.Unit, error) {
 	return topoSort(units)
 }
 
-// CheckOrder reports whether units can be ordered -- no dependency
-// cycle, counting a socket's implicit ordering before its service -- by
-// the same check New makes, so --validate catches at build time what
-// would otherwise fail at startup. Like New, it folds Before= into
-// After= in place.
-func CheckOrder(units []*unit.Unit) error {
-	_, err := orderUnits(units)
+// Check reports whether New would accept units: they can be ordered --
+// no dependency cycle, counting a socket's implicit ordering before its
+// service -- and no native-mode socket shares its service (see
+// checkSharedSockets). It is the same check New makes, so --validate
+// catches at build time what would otherwise fail at startup. Like New,
+// it folds Before= into After= in place.
+func Check(units []*unit.Unit) error {
+	_, err := checkUnits(units)
 	return err
 }
+
+// checkUnits is New's check of the whole unit set: the units in start
+// order, or why they cannot be started.
+func checkUnits(units []*unit.Unit) ([]*unit.Unit, error) {
+	ordered, err := orderUnits(units)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkSharedSockets(units); err != nil {
+		return nil, err
+	}
+	return ordered, nil
+}
+
+// checkSharedSockets rejects a service that a native-mode socket
+// activates alongside any other socket. A native activation passes the
+// service only the listener that activated it, and runs under the
+// service's run lock; while it runs, another socket's activation waits
+// for the service to exit, so that socket's clients would queue,
+// unserved, for as long as the service lives -- possibly the whole
+// container. (systemd instead passes every socket of the service at
+// start.) Several proxy-mode sockets may share a service: a proxied
+// connection is served by whichever helper is running, without waiting
+// for the lock. A socket naming a service that is not loaded never
+// activates anything, so is not counted.
+func checkSharedSockets(units []*unit.Unit) error {
+	loaded := make(map[string]bool, len(units))
+	for _, u := range units {
+		loaded[u.Name] = true
+	}
+	var services []string
+	sockets := map[string][]*unit.Unit{}
+	for _, u := range units {
+		if u.Kind != unit.KindSocket || !loaded[u.Service] {
+			continue
+		}
+		if sockets[u.Service] == nil {
+			services = append(services, u.Service)
+		}
+		sockets[u.Service] = append(sockets[u.Service], u)
+	}
+	var errs []error
+	for _, svc := range services {
+		socks := sockets[svc]
+		if len(socks) < 2 || !slices.ContainsFunc(socks, isNative) {
+			continue
+		}
+		desc := make([]string, len(socks))
+		for i, s := range socks {
+			desc[i] = fmt.Sprintf("%s (%s)", s.Name, s.ActivationMode)
+		}
+		errs = append(errs, fmt.Errorf("service %s is activated by %d sockets, %s: "+
+			"a native-mode socket must be the only socket for its service, "+
+			"since its service is passed only that socket's listener and the "+
+			"others' clients would wait until it exits; give each native socket "+
+			"its own service, or make every socket for %s ActivationMode=proxy",
+			svc, len(socks), strings.Join(desc, ", "), svc))
+	}
+	return errors.Join(errs...)
+}
+
+func isNative(u *unit.Unit) bool { return u.ActivationMode == unit.ActivationNative }
 
 // resolveBefore rewrites every "u Before= X" into the equivalent
 // "X After= u", in place, and must run before topoSort.

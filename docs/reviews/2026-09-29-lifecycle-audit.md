@@ -342,8 +342,13 @@ by the deadline and by `CloseWait`, and exact accounting (records
 written plus `Dropped()` equals records emitted; `trace_dropped`'s
 `total` matches).
 
-Still open: two native sockets sharing one long-running service. Each
+Two native sockets sharing one long-running service could hang: each
 activation passes only its own listener, and the run lock makes the
 second wait for the service to exit, so its clients can wait
-indefinitely. systemd passes every socket of the service at start; that
-change is left for a separate review.
+indefinitely. The same holds for a native socket sharing its service
+with a proxy one. Until activation passes every socket of the service
+at start, as systemd does, such a unit set is rejected: `New` and
+`--validate` (`supervisor.Check`) fail it with exit 64 and an error
+naming the service and its sockets. Several proxy sockets may still
+share a service, since a proxied connection does not wait for the run
+lock.

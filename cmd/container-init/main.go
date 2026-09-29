@@ -85,9 +85,10 @@ func main() {
 		fmt.Fprintf(os.Stdout,
 			"container-init validate: units=%d warnings=%d overrides=%d strict=%v\n",
 			len(units), len(warnings), len(overrides), *strict)
-		// The ordering check startup makes: a cycle fails the boot
-		// with 64, so it fails validation the same way, strict or not.
-		if err := supervisor.CheckOrder(units); err != nil {
+		// The unit-set check startup makes: a dependency cycle or a
+		// shared native socket fails the boot with 64, so it fails
+		// validation the same way, strict or not.
+		if err := supervisor.Check(units); err != nil {
 			fmt.Fprintf(os.Stderr, "container-init: validate: %v\n", err)
 			exitWith(64)
 		}

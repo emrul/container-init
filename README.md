@@ -95,9 +95,10 @@ directive / section, unsupported value form, missing requirement) into
 a fatal load error -- useful in CI to catch typos before they ship.
 
 The `--validate` flag loads + parses units, prints a summary, and
-exits without supervising. It also makes the ordering check startup
+exits without supervising. It also makes the unit-set checks startup
 makes: a dependency cycle in `After=` / `Before=`, including one
-through a `.socket`'s implicit ordering before its service, exits 64
+through a `.socket`'s implicit ordering before its service, or a
+native-mode socket sharing its service with another socket, exits 64
 as it would at boot, with or without `--strict-units`; any load
 warning exits 1. Combined with `--strict-units`, this is a build-time
 sanity check.
@@ -469,6 +470,12 @@ RestartSec=500ms
 The helper reads `LISTEN_PID` / `LISTEN_FDS` and uses
 `os.NewFile(3, "listener")` to consume the inherited fd. Cold-start
 lands on the first connection, not at boot.
+
+A native socket must be the only socket for its service: container-init
+passes the service just the listener that activated it, so a unit set
+where a native socket shares its service with any other socket is
+refused at startup and by `--validate`. Give each native socket its own
+service, or use proxy mode for all of them.
 
 ### 4. Socket-activated helper, proxy mode
 

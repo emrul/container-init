@@ -178,27 +178,55 @@ func TestSocketAfterItsServiceIsACycle(t *testing.T) {
 	}
 }
 
-func TestCheckOrder(t *testing.T) {
-	// The --validate check agrees with New's: a sound set passes, and
-	// both an explicit cycle and one through a socket's implicit
-	// ordering are reported.
+func proxySocketFor(name, service string) *unit.Unit {
+	u := socketFor(name, service)
+	u.ActivationMode, u.ProxyTarget = unit.ActivationProxy, "127.0.0.1:9"
+	return u
+}
+
+func TestCheck(t *testing.T) {
+	// The --validate check agrees with New's: a sound set passes; an
+	// explicit cycle, one through a socket's implicit ordering, and a
+	// native socket sharing its service are all reported.
 	cases := []struct {
 		name  string
 		units []*unit.Unit
-		cycle bool
+		want  []string // substrings of the error; nil = accepted
 	}{
-		{"sound", units(u("a.service"), u("b.service", "a.service"), socketFor("a.socket", "a.service")), false},
-		{"Before= cycle", units(before("a.service", "b.service"), before("b.service", "a.service")), true},
-		{"socket After= its service", units(u("a.service"), socketFor("a.socket", "a.service", "a.service")), true},
+		{"sound", units(u("a.service"), u("b.service", "a.service"), socketFor("a.socket", "a.service")), nil},
+		{"Before= cycle", units(before("a.service", "b.service"), before("b.service", "a.service")), []string{"cycle"}},
+		{"socket After= its service", units(u("a.service"), socketFor("a.socket", "a.service", "a.service")), []string{"cycle"}},
+		{"two native sockets, one service",
+			units(u("a.service"), socketFor("a.socket", "a.service"), socketFor("b.socket", "a.service")),
+			[]string{"service a.service", "a.socket (native)", "b.socket (native)", "only socket for its service"}},
+		{"native and proxy sockets, one service",
+			units(u("a.service"), proxySocketFor("a.socket", "a.service"), socketFor("b.socket", "a.service")),
+			[]string{"service a.service", "a.socket (proxy)", "b.socket (native)"}},
+		{"two proxy sockets, one service",
+			units(u("a.service"), proxySocketFor("a.socket", "a.service"), proxySocketFor("b.socket", "a.service")), nil},
+		{"native sockets, a service each",
+			units(u("a.service"), u("b.service"), socketFor("a.socket", "a.service"), socketFor("b.socket", "b.service")), nil},
+		{"native sockets naming an unloaded service",
+			units(socketFor("a.socket", "gone.service"), socketFor("b.socket", "gone.service")), nil},
+		{"every shared service reported",
+			units(u("a.service"), u("b.service"),
+				socketFor("a1.socket", "a.service"), socketFor("a2.socket", "a.service"),
+				socketFor("b1.socket", "b.service"), socketFor("b2.socket", "b.service")),
+			[]string{"service a.service", "service b.service"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := CheckOrder(tc.units)
-			if (err != nil) != tc.cycle {
-				t.Errorf("CheckOrder = %v, want cycle %v", err, tc.cycle)
+			err := Check(tc.units)
+			if (err != nil) != (tc.want != nil) {
+				t.Fatalf("Check = %v, want error %v", err, tc.want != nil)
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(err.Error(), w) {
+					t.Errorf("error %q does not mention %q", err, w)
+				}
 			}
 			if _, newErr := New(tc.units, nil, pid1.NewDispatcher(), nil); (newErr != nil) != (err != nil) {
-				t.Errorf("CheckOrder = %v but New = %v; they must agree", err, newErr)
+				t.Errorf("Check = %v but New = %v; they must agree", err, newErr)
 			}
 		})
 	}

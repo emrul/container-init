@@ -120,7 +120,7 @@ func New(units []*unit.Unit, tracer *trace.Tracer, dispatcher *pid1.Dispatcher, 
 	if cg == nil {
 		cg = &cgroup.Manager{}
 	}
-	ordered, err := orderUnits(units)
+	ordered, err := checkUnits(units)
 	if err != nil {
 		return nil, err
 	}
