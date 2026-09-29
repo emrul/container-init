@@ -152,4 +152,3 @@ func TestStartTransientUnitOverWire(t *testing.T) {
 		t.Errorf("InvocationID signature = %s, want ay", inv.Signature())
 	}
 }
-

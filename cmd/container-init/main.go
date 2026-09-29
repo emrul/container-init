@@ -59,8 +59,8 @@ func main() {
 	for _, o := range overrides {
 		log.Printf("drop-in override: %s replaces %s with %s", o.Name, o.BasePath, o.OverridePath)
 		tracer.Event("unit_overridden", map[string]any{
-			"unit":         o.Name,
-			"base_path":    o.BasePath,
+			"unit":          o.Name,
+			"base_path":     o.BasePath,
 			"override_path": o.OverridePath,
 		})
 	}

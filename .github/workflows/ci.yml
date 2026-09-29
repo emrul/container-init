@@ -16,6 +16,13 @@ jobs:
           go-version-file: go.mod
       - run: go test ./...
       - run: go vet ./...
+      # Vendored upstream code keeps its own formatting.
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l $(git ls-files '*.go' | grep -v '^third_party/'))
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt needed:"; echo "$unformatted"; exit 1
+          fi
 
   build:
     runs-on: ubuntu-latest

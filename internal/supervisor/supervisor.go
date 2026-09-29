@@ -30,8 +30,8 @@ import (
 	"github.com/emrul/container-init/internal/pid1"
 	"github.com/emrul/container-init/internal/socketact"
 	"github.com/emrul/container-init/internal/trace"
-	"github.com/emrul/container-init/unit"
 	"github.com/emrul/container-init/internal/userdb"
+	"github.com/emrul/container-init/unit"
 )
 
 // Supervisor coordinates the lifecycle of every loaded unit.
@@ -54,7 +54,7 @@ type Supervisor struct {
 	// starts after.
 	spawnGate sync.RWMutex
 	noSpawn   bool
-	doneCh     chan struct{}
+	doneCh    chan struct{}
 
 	mu       sync.Mutex
 	services map[string]*serviceState
@@ -129,24 +129,24 @@ func New(units []*unit.Unit, tracer *trace.Tracer, dispatcher *pid1.Dispatcher, 
 		limits[u.Name] = newStartLimiter(u)
 	}
 	return &Supervisor{
-		units:      ordered,
-		byName:     byName,
-		tracer:     tracer,
-		dispatcher: dispatcher,
-		cgroup:     cg,
-		postLabels: os.Getenv("CONTAINER_INIT_TRACE_LABELS"),
-		euid:       uint32(os.Geteuid()),
-		egid:       uint32(os.Getegid()),
-		stopCh:     make(chan struct{}),
+		units:       ordered,
+		byName:      byName,
+		tracer:      tracer,
+		dispatcher:  dispatcher,
+		cgroup:      cg,
+		postLabels:  os.Getenv("CONTAINER_INIT_TRACE_LABELS"),
+		euid:        uint32(os.Geteuid()),
+		egid:        uint32(os.Getegid()),
+		stopCh:      make(chan struct{}),
 		stopTimeout: defaultStopTimeout,
-		doneCh:     make(chan struct{}),
-		services:   make(map[string]*serviceState),
-		bounds:     make(map[string]*socketact.Bound),
-		ready:      ready,
-		failed:     make(map[string]bool),
-		limits:     limits,
-		missingReq: unit.MissingRequirements(byName),
-		wrapper:    "/proc/self/exe",
+		doneCh:      make(chan struct{}),
+		services:    make(map[string]*serviceState),
+		bounds:      make(map[string]*socketact.Bound),
+		ready:       ready,
+		failed:      make(map[string]bool),
+		limits:      limits,
+		missingReq:  unit.MissingRequirements(byName),
+		wrapper:     "/proc/self/exe",
 	}, nil
 }
 

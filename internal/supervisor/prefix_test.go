@@ -59,9 +59,9 @@ func TestLinePrefixWriterConcurrent(t *testing.T) {
 
 func TestUnitLabel(t *testing.T) {
 	cases := map[string]string{
-		"web.service":        "web",
+		"web.service":         "web",
 		"audio-out-ws.socket": "audio-out-ws",
-		"plain":              "plain",
+		"plain":               "plain",
 	}
 	for in, want := range cases {
 		if got := unitLabel(in); got != want {
