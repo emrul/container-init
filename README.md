@@ -291,6 +291,19 @@ Drop-ins participate in the supervisor's full lifecycle:
   systemd -- so under `Restart=always` / `Restart=on-failure` it fires
   only once a start limit runs out. Chains across the core/drop-in
   boundary identically.
+- **Socket activation** -- a `.socket` starts its service on the first
+  connection. Once the service stops and `Restart=` will not start it
+  again (a clean exit, or a failure), the socket listens again and the
+  next connection starts it anew, as in systemd. The socket fails and
+  closes its listener when the service hits its start limit, when a
+  unit the service `Requires=` and orders `After=` failed, or when its
+  own trigger limit is spent: more than `TriggerLimitBurst=`
+  activations within `TriggerLimitIntervalSec=` (both in `[Socket]`).
+  Unlike the start limit, a socket that sets neither gets systemd's
+  defaults for `Accept=no`, 20 activations per 2s, so a service that
+  exits without taking its connection cannot be restarted as fast as it
+  exits; `0` in either disables it. A failed socket fires its own
+  `OnFailure=`.
 - **ExitContainerOnFailure=true** -- fail-secure: take the whole
   container down via reverse shutdown on this unit's first failure,
   even one `Restart=` would have recovered from; `OnFailure=` fires on

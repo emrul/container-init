@@ -154,6 +154,12 @@ type Unit struct {
 	SocketUser     string
 	SocketGroup    string
 	SocketMode     os.FileMode // 0 = "use kernel default"
+	// Trigger rate limit: more than TriggerLimitBurst activations
+	// within TriggerLimitIntervalSec fails the socket. Unlike the start
+	// limit, a socket that sets neither gets systemd's defaults (20 /
+	// 2s); 0 in either disables it.
+	TriggerLimitBurst       int
+	TriggerLimitIntervalSec time.Duration
 
 	// [Install]
 	WantedBy []string

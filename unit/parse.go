@@ -229,6 +229,7 @@ func LoadFile(path string, opts Options) (*Unit, []Warning, error) {
 		}
 	}
 	l.finishStartLimit(u)
+	l.finishTriggerLimit(u)
 	if err := validate(u); err != nil {
 		return nil, l.warnings, err
 	}
@@ -246,7 +247,8 @@ type loader struct {
 	opts     Options
 	warnings []Warning
 
-	startLimitBurstSet, startLimitIntervalSet bool
+	startLimitBurstSet, startLimitIntervalSet     bool
+	triggerLimitBurstSet, triggerLimitIntervalSet bool
 }
 
 func (l *loader) warn(section, directive, msg string) {
@@ -358,6 +360,29 @@ func (l *loader) finishStartLimit(u *Unit) {
 	}
 	if l.startLimitIntervalSet && !l.startLimitBurstSet {
 		u.StartLimitBurst = defaultStartLimitBurst
+	}
+}
+
+// Defaults for a socket's trigger limit (systemd's for Accept=no).
+const (
+	defaultTriggerLimitBurst    = 20
+	defaultTriggerLimitInterval = 2 * time.Second
+)
+
+// finishTriggerLimit gives a socket systemd's trigger limit for
+// whatever half it left unset. Unlike the start limit, a socket that
+// sets neither is limited too: re-armed after its service stops, a
+// socket whose service exits without accepting the pending connection
+// would otherwise restart it as fast as it can exit.
+func (l *loader) finishTriggerLimit(u *Unit) {
+	if u.Kind != KindSocket {
+		return
+	}
+	if !l.triggerLimitBurstSet {
+		u.TriggerLimitBurst = defaultTriggerLimitBurst
+	}
+	if !l.triggerLimitIntervalSet {
+		u.TriggerLimitIntervalSec = defaultTriggerLimitInterval
 	}
 }
 
@@ -521,6 +546,20 @@ func (l *loader) applySocketSection(u *Unit, name, value string) error {
 			return fmt.Errorf("SocketMode: %w", err)
 		}
 		u.SocketMode = m
+	case "TriggerLimitBurst":
+		n, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("TriggerLimitBurst: %w", err)
+		}
+		u.TriggerLimitBurst = n
+		l.triggerLimitBurstSet = true
+	case "TriggerLimitIntervalSec":
+		d, err := parseDuration(value)
+		if err != nil {
+			return fmt.Errorf("TriggerLimitIntervalSec: %w", err)
+		}
+		u.TriggerLimitIntervalSec = d
+		l.triggerLimitIntervalSet = true
 	default:
 		l.warn("Socket", name, "directive not in supported subset (ignored)")
 	}

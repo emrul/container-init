@@ -39,3 +39,37 @@ func TestStartLimitParsing(t *testing.T) {
 		})
 	}
 }
+
+func TestTriggerLimitParsing(t *testing.T) {
+	const listen = "[Socket]\nListenStream=/run/x.sock\n"
+	cases := []struct {
+		name     string
+		body     string
+		burst    int
+		interval time.Duration
+	}{
+		{"neither: systemd's defaults", listen, 20, 2 * time.Second},
+		{"both", listen + "TriggerLimitBurst=3\nTriggerLimitIntervalSec=30s\n", 3, 30 * time.Second},
+		{"burst only: default interval", listen + "TriggerLimitBurst=3\n", 3, 2 * time.Second},
+		{"interval only: default burst", listen + "TriggerLimitIntervalSec=1m\n", 20, time.Minute},
+		{"burst 0 disables", listen + "TriggerLimitBurst=0\n", 0, 2 * time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeUnit(t, dir, "x.socket", tc.body)
+			units, warnings, err := LoadDir(dir, Options{})
+			if err != nil {
+				t.Fatalf("LoadDir: %v", err)
+			}
+			if len(warnings) != 0 {
+				t.Errorf("warnings = %v", warnings)
+			}
+			u := units[0]
+			if u.TriggerLimitBurst != tc.burst || u.TriggerLimitIntervalSec != tc.interval {
+				t.Errorf("trigger limit = %d / %v, want %d / %v",
+					u.TriggerLimitBurst, u.TriggerLimitIntervalSec, tc.burst, tc.interval)
+			}
+		})
+	}
+}

@@ -21,6 +21,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -713,80 +714,133 @@ func (s *Supervisor) bindSocket(u *unit.Unit) {
 	}
 }
 
-// driveNative blocks until the listener is readable, then exec's the
-// service with the listening fd inherited as fd 3. Restarts the
-// service per its Restart= policy, re-passing the same fd each time.
+// activationEnd says why a socket-activated service stopped running.
+type activationEnd int
+
+const (
+	endStopped    activationEnd = iota // the supervisor is stopping
+	endIdle                            // exited and not restarted: listen again
+	endStartLimit                      // hit its start limit: the socket fails
+	endDependency                      // a unit it requires failed: the socket fails
+	endExit                            // ExitContainerOnFailure= is taking the container down
+)
+
+// afterActivation says what a socket does once its service's
+// activation ended with end: listen again, fail with reason, or
+// neither because the container is going down.
+func afterActivation(svc *unit.Unit, end activationEnd) (rearm bool, failReason string) {
+	switch end {
+	case endIdle:
+		return true, ""
+	case endStartLimit:
+		return false, svc.Name + " hit its start limit"
+	case endDependency:
+		return false, svc.Name + " cannot start: a unit it requires failed"
+	}
+	return false, ""
+}
+
+// driveNative waits for the listener to become readable, then execs
+// the service with the listening fd inherited as fd 3, restarting it
+// per its Restart= policy. Once the service stops and is not restarted,
+// the socket listens again and the next connection starts it anew, as
+// in systemd. It fails, closing the listener, when the service hits
+// its start limit, when a unit the service requires failed, or when
+// the socket's own trigger limit is spent.
 func (s *Supervisor) driveNative(sock *unit.Unit, bound *socketact.Bound) {
 	svc, ok := s.byName[sock.Service]
 	if !ok {
 		log.Printf("socket %s: unknown service %s", sock.Name, sock.Service)
 		return
 	}
-	if err := waitReadable(int(bound.File.Fd()), s.stopCh); err != nil {
-		return
-	}
-	// Honour the helper service's After= before its first
-	// spawn -- the socket has been listening since Pass 1, so a client
-	// may have queued bytes already; we still don't exec the helper
-	// until prerequisite oneshot units have completed.
-	if dep, ok := s.waitDeps(svc); !ok {
-		if dep != "" {
-			s.logDependencyFailed(svc, dep)
-		}
-		return
-	}
-	s.event(sock.Name, "first_connect", nil)
-	for {
-		select {
-		case <-s.stopCh:
-			return
-		default:
-		}
-		if !s.allowStart(svc) {
-			s.startLimitHit(svc)
+	for first := true; ; first = false {
+		if err := waitReadable(int(bound.File.Fd()), s.stopCh); err != nil {
 			return
 		}
-		exitErr := s.spawnAndWait(svc, bound, nil)
-		failed := exitErr != nil
-		s.event(svc.Name, "exited", map[string]any{"failed": failed, "err": errString(exitErr)})
-		if failed && svc.ExitContainerOnFailure {
-			s.unitFailed(svc, exitErr)
-			s.Stop()
-			return
-		}
-		if !shouldRestart(svc, failed) {
-			if failed {
-				s.unitFailed(svc, exitErr)
+		end := endIdle
+		if first {
+			// Honour the helper service's After= before its first
+			// spawn -- the socket has been listening since Pass 1, so a
+			// client may have queued bytes already; we still don't exec
+			// the helper until prerequisite oneshot units have completed.
+			if dep, ok := s.waitDeps(svc); !ok {
+				if dep == "" {
+					return
+				}
+				s.logDependencyFailed(svc, dep)
+				end = endDependency
 			}
-			return
 		}
-		if svc.RestartSec > 0 {
-			select {
-			case <-time.After(svc.RestartSec):
-			case <-s.stopCh:
+		if end == endIdle {
+			if reason := s.trigger(sock, first); reason != "" {
+				s.socketFailed(sock, bound, reason)
 				return
 			}
+			end = s.runActivated(svc, bound)
 		}
+		rearm, reason := afterActivation(svc, end)
+		if reason != "" {
+			s.socketFailed(sock, bound, reason)
+		}
+		if !rearm {
+			return
+		}
+		s.listeningAgain(sock, svc)
 	}
 }
 
-// driveProxy keeps the public listener in container-init. On first
-// accept it lazy-starts the helper on its private endpoint and
-// proxies bytes; subsequent connects reuse the running helper. The
-// helper is restarted independently per its Restart= policy.
+// driveProxy keeps the public listener in container-init. A connection
+// that finds no helper running starts one on its private endpoint;
+// later connections reuse it. The helper restarts per its Restart=
+// policy, and once it stops for good the next connection starts it
+// anew. The socket fails, as in driveNative, on the helper's start
+// limit, a failed requirement, or its own trigger limit.
 func (s *Supervisor) driveProxy(sock *unit.Unit, bound *socketact.Bound) {
 	svc, ok := s.byName[sock.Service]
 	if !ok {
 		log.Printf("socket %s: unknown service %s", sock.Name, sock.Service)
 		return
 	}
-	helperUp := make(chan struct{})
-	var startOnce sync.Once
-	startHelper := func() {
-		startOnce.Do(func() {
-			s.event(sock.Name, "first_connect", nil)
-			go s.runHelperLoop(svc, helperUp)
-		})
+	var (
+		mu     sync.Mutex
+		up     chan struct{} // closed once the running helper may be dialled; nil while none runs
+		first  = true
+		failed atomic.Bool // the socket failed and closed its listener
+	)
+	fail := func(reason string) {
+		failed.Store(true)
+		s.socketFailed(sock, bound, reason)
+	}
+	// helper returns the running helper's channel, starting a helper if
+	// none runs; false means the socket has failed.
+	helper := func() (chan struct{}, bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		if up != nil {
+			return up, true
+		}
+		if reason := s.trigger(sock, first); reason != "" {
+			fail(reason)
+			return nil, false
+		}
+		ch := make(chan struct{})
+		up = ch
+		checkDeps := first
+		first = false
+		go func() {
+			end := s.runHelperLoop(svc, ch, checkDeps)
+			mu.Lock()
+			up = nil
+			mu.Unlock()
+			rearm, reason := afterActivation(svc, end)
+			if reason != "" {
+				fail(reason)
+			}
+			if rearm {
+				s.listeningAgain(sock, svc)
+			}
+		}()
+		return ch, true
 	}
 
 	go func() {
@@ -801,11 +855,17 @@ func (s *Supervisor) driveProxy(sock *unit.Unit, bound *socketact.Bound) {
 				return
 			default:
 			}
-			log.Printf("socket %s accept: %v", sock.Name, err)
+			if !failed.Load() {
+				log.Printf("socket %s accept: %v", sock.Name, err)
+			}
 			return
 		}
-		startHelper()
-		<-helperUp
+		ch, ok := helper()
+		if !ok {
+			conn.Close()
+			return
+		}
+		<-ch
 		network, target := splitProxyTarget(sock.ProxyTarget)
 		go func(c net.Conn) {
 			defer c.Close()
@@ -816,61 +876,105 @@ func (s *Supervisor) driveProxy(sock *unit.Unit, bound *socketact.Bound) {
 	}
 }
 
-// runHelperLoop spawns the proxy-mode helper and respawns on failure
-// per its Restart= policy. helperUp is closed before the first
-// spawnAndWait returns so the proxy goroutine can begin dialing the
-// private endpoint (with retry).
-func (s *Supervisor) runHelperLoop(svc *unit.Unit, helperUp chan struct{}) {
-	if dep, ok := s.waitDeps(svc); !ok {
-		if dep != "" {
+// runHelperLoop runs one activation of the proxy-mode helper. helperUp
+// is closed before the first spawn so the proxy can begin dialling the
+// private endpoint (with retry). The helper's After= is honoured on the
+// socket's first activation only; later ones find it settled.
+func (s *Supervisor) runHelperLoop(svc *unit.Unit, helperUp chan struct{}, checkDeps bool) activationEnd {
+	if checkDeps {
+		if dep, ok := s.waitDeps(svc); !ok {
+			close(helperUp) // unblock the accept loop
+			if dep == "" {
+				return endStopped
+			}
 			s.logDependencyFailed(svc, dep)
+			return endDependency
 		}
-		close(helperUp) // unblock the accept loop
-		return
 	}
-	first := true
+	close(helperUp)
+	return s.runActivated(svc, nil)
+}
+
+// runActivated runs a socket-activated service, restarting it per its
+// Restart= policy, until it stops for good. extra is the listener to
+// pass in native mode, nil in proxy mode.
+func (s *Supervisor) runActivated(svc *unit.Unit, extra *socketact.Bound) activationEnd {
 	for {
 		select {
 		case <-s.stopCh:
-			return
+			return endStopped
 		default:
-		}
-		if first {
-			close(helperUp)
-			first = false
 		}
 		if !s.allowStart(svc) {
 			s.startLimitHit(svc)
-			return
+			return endStartLimit
 		}
-		exitErr := s.spawnAndWait(svc, nil, nil)
+		exitErr := s.spawnAndWait(svc, extra, nil)
 		failed := exitErr != nil
 		s.event(svc.Name, "exited", map[string]any{"failed": failed, "err": errString(exitErr)})
 		if failed && svc.ExitContainerOnFailure {
 			s.unitFailed(svc, exitErr)
 			s.Stop()
-			return
+			return endExit
 		}
 		if !shouldRestart(svc, failed) {
 			if failed {
 				s.unitFailed(svc, exitErr)
 			}
-			return
+			return endIdle
 		}
 		if svc.RestartSec > 0 {
 			select {
 			case <-time.After(svc.RestartSec):
 			case <-s.stopCh:
-				return
+				return endStopped
 			}
 		}
+	}
+}
+
+// trigger counts one activation of sock against its trigger limit. It
+// returns why the socket must fail when the limit is spent, or "".
+func (s *Supervisor) trigger(sock *unit.Unit, first bool) string {
+	if !s.allowStart(sock) {
+		return fmt.Sprintf("trigger limit hit (%d activations within %v)",
+			sock.TriggerLimitBurst, sock.TriggerLimitIntervalSec)
+	}
+	if first {
+		s.event(sock.Name, "first_connect", nil)
+	} else {
+		s.event(sock.Name, "triggered", nil)
+	}
+	return ""
+}
+
+// listeningAgain logs that sock is back to waiting for a connection
+// after svc stopped.
+func (s *Supervisor) listeningAgain(sock, svc *unit.Unit) {
+	log.Printf("socket %s: %s stopped; listening again", sock.Name, svc.Name)
+	s.event(sock.Name, "rearmed", map[string]any{"service": svc.Name})
+}
+
+// socketFailed closes a socket that will not start its service again.
+// As in systemd, the socket's own OnFailure= fires.
+func (s *Supervisor) socketFailed(sock *unit.Unit, bound *socketact.Bound, reason string) {
+	log.Printf("socket %s: failed: %s; closing the listener", sock.Name, reason)
+	s.event(sock.Name, "socket_failed", map[string]any{"reason": reason})
+	s.mu.Lock()
+	delete(s.bounds, sock.Name)
+	s.mu.Unlock()
+	bound.Close()
+	for _, target := range sock.OnFailure {
+		go s.fireOnFailure(target)
 	}
 }
 
 // startLimiter enforces StartLimitBurst= / StartLimitIntervalSec= the
 // way systemd's ratelimit does: a window opens at the first start and
 // admits burst starts; a start after the window has elapsed opens a
-// new one. Every start counts, restarts and the first alike.
+// new one. Every start counts, restarts and the first alike. A socket's
+// limiter enforces its TriggerLimitBurst= / TriggerLimitIntervalSec=
+// instead, counting activations.
 type startLimiter struct {
 	burst    int
 	interval time.Duration
@@ -879,6 +983,9 @@ type startLimiter struct {
 }
 
 func newStartLimiter(u *unit.Unit) *startLimiter {
+	if u.Kind == unit.KindSocket {
+		return &startLimiter{burst: u.TriggerLimitBurst, interval: u.TriggerLimitIntervalSec}
+	}
 	return &startLimiter{burst: u.StartLimitBurst, interval: u.StartLimitIntervalSec}
 }
 

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sync"
 
 	"github.com/emrul/container-init/unit"
 )
@@ -13,8 +14,9 @@ import (
 // be re-passed across service restarts.
 type Bound struct {
 	Listener unit.Listener
-	File     *os.File // owns the bound fd; never closed except on shutdown
+	File     *os.File // owns the bound fd; closed on shutdown or when the socket fails
 	listener net.Listener
+	close    sync.Once
 }
 
 // Bind opens the listener described by l. The returned *os.File is
@@ -57,17 +59,21 @@ func Bind(l unit.Listener) (*Bound, error) {
 	return nil, fmt.Errorf("unsupported network %q", l.Network)
 }
 
-// Close releases the bound listener. Used during reverse shutdown.
+// Close releases the bound listener, on reverse shutdown or when the
+// socket fails. Only the first call acts, so a later one cannot remove
+// a socket something else has since bound at the same path.
 func (b *Bound) Close() {
-	if b.listener != nil {
-		_ = b.listener.Close()
-	}
-	if b.File != nil {
-		_ = b.File.Close()
-	}
-	if b.Listener.Network == "unix" {
-		_ = os.Remove(b.Listener.Address)
-	}
+	b.close.Do(func() {
+		if b.listener != nil {
+			_ = b.listener.Close()
+		}
+		if b.File != nil {
+			_ = b.File.Close()
+		}
+		if b.Listener.Network == "unix" {
+			_ = os.Remove(b.Listener.Address)
+		}
+	})
 }
 
 // Accept returns the next connection on the bound listener. Used by
