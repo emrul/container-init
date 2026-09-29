@@ -3,7 +3,6 @@
 package supervisor
 
 import (
-	"errors"
 	"syscall"
 )
 
@@ -23,10 +22,6 @@ func spawnIntoCgroup(attr *syscall.SysProcAttr, fd int) {}
 
 func killGroup(pid int, sig syscall.Signal) error {
 	return syscall.Kill(-pid, sig)
-}
-
-func waitReadable(fd int, stop <-chan struct{}) error {
-	return errors.New("waitReadable: not implemented on this platform (linux-only build)")
 }
 
 func processAlive(pid int) bool {

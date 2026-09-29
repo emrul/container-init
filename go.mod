@@ -9,7 +9,7 @@ require (
 	github.com/godbus/dbus/v5 v5.2.2
 )
 
-require golang.org/x/sys v0.48.0 // indirect
+require golang.org/x/sys v0.48.0
 
 // In-tree patched godbus. The patch in third_party/godbus/decoder.go
 // fixes a reflect.Append type-mismatch panic that hits any time a

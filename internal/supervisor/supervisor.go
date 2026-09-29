@@ -97,6 +97,10 @@ type serviceState struct {
 	lastExit  pid1.ExitStatus
 	lastErr   error
 	exited    bool // set true when the dispatcher delivers an exit status
+	// inCgroup says the process started in (or was moved into) the
+	// unit's cgroup, so cgroup.kill reaches it. False when cgroup v2 is
+	// off or placing it failed: it is then killed by pid and group.
+	inCgroup bool
 }
 
 // New constructs a supervisor for the given units. The dispatcher
@@ -622,13 +626,15 @@ func (s *Supervisor) spawnAndWait(u *unit.Unit, extra *socketact.Bound, onSpawne
 		}
 	}
 
+	// The gate covers only the spawn and its recording, never trace
+	// output: a trace destination that blocks must not hold up
+	// shutdown (see shutdown).
+	invokePhase := s.tracer.Begin(trace.PhaseFromUnitName(u.Name))
 	s.spawnGate.RLock()
 	if s.noSpawn {
 		s.spawnGate.RUnlock()
 		return errStopping
 	}
-	s.event(u.Name, "spawn", map[string]any{"argv": u.ExecStart})
-	invokePhase := s.tracer.Begin(trace.PhaseFromUnitName(u.Name))
 	pid, exitCh, err := s.dispatcher.Spawn(cmd)
 	// The child holds its own copy of the write end; ours must go so
 	// the read below sees EOF when the service execs.
@@ -638,22 +644,16 @@ func (s *Supervisor) spawnAndWait(u *unit.Unit, extra *socketact.Bound, onSpawne
 		invokePhase.EndStatus("error", map[string]any{"unit": u.Name, "err": err.Error()})
 		return s.startFailed(u, err)
 	}
-	status := make(chan string, 1)
-	go func() {
-		b, _ := io.ReadAll(statusR)
-		status <- string(b)
-	}()
-	invokePhase.End(map[string]any{"unit": u.Name, "pid": pid})
-	if label := trace.PostSpawnLabel(s.postLabels, u.Name); label != "" {
-		s.tracer.MemSnapshot(label)
-	}
 	// Fallback when the child could not be spawned into its cgroup:
 	// migrate it now. Future fork(2)s inherit the cgroup, but anything
 	// the child forked before this Place lands stays in container-init's
 	// cgroup, out of reach of cgroup.kill.
+	inCgroup := placed
 	if s.cgroup.Available() && !placed {
 		if err := s.cgroup.Place(u.Name, pid); err != nil {
-			log.Printf("cgroup place %s pid=%d: %v", u.Name, pid, err)
+			log.Printf("cgroup place %s pid=%d: %v (killing it by process group)", u.Name, pid, err)
+		} else {
+			inCgroup = true
 		}
 	}
 	// Release Go's pidfd handle / process state. We own this PID via
@@ -663,11 +663,22 @@ func (s *Supervisor) spawnAndWait(u *unit.Unit, extra *socketact.Bound, onSpawne
 	// rather than cmd.Process.Kill.
 	_ = cmd.Process.Release()
 
-	state := &serviceState{name: u.Name, pid: pid, startedAt: time.Now()}
+	state := &serviceState{name: u.Name, pid: pid, startedAt: time.Now(), inCgroup: inCgroup}
 	s.mu.Lock()
 	s.services[u.Name] = state
 	s.mu.Unlock()
 	s.spawnGate.RUnlock()
+
+	status := make(chan string, 1)
+	go func() {
+		b, _ := io.ReadAll(statusR)
+		status <- string(b)
+	}()
+	s.event(u.Name, "spawn", map[string]any{"argv": u.ExecStart, "pid": pid})
+	invokePhase.End(map[string]any{"unit": u.Name, "pid": pid})
+	if label := trace.PostSpawnLabel(s.postLabels, u.Name); label != "" {
+		s.tracer.MemSnapshot(label)
+	}
 
 	// Wait for the wrapper to exec the service (EOF on the status pipe)
 	// or to report why it could not. This can take as long as a hung
@@ -705,14 +716,12 @@ func (s *Supervisor) finish(u *unit.Unit, state *serviceState, es pid1.ExitStatu
 	state.lastExit = es
 	state.lastErr = exitErr
 	s.mu.Unlock()
-	// Best-effort orphan cleanup. With cgroup-v2 we own an atomic
-	// "kill everything in this cgroup" lever and use it; on restart
-	// the cgroup will be re-populated cleanly by the next Place.
-	// Without cgroup-v2 we fall back to a SIGTERM-only PGID nudge
-	// (PID reuse rules out a delayed SIGKILL).
-	if s.cgroup.Available() {
-		_ = s.cgroup.Kill(u.Name)
-	} else {
+	// Best-effort orphan cleanup. With the process in its cgroup we own
+	// an atomic "kill everything in this cgroup" lever and use it; on
+	// restart the cgroup will be re-populated cleanly by the next
+	// spawn. Otherwise we fall back to a SIGTERM-only PGID nudge (PID
+	// reuse rules out a delayed SIGKILL).
+	if !state.inCgroup || s.cgroup.Kill(u.Name) != nil {
 		_ = killGroup(state.pid, syscall.SIGTERM)
 	}
 	return exitErr
@@ -787,7 +796,7 @@ func (s *Supervisor) driveNative(sock *unit.Unit, bound *socketact.Bound) {
 		return
 	}
 	for first := true; ; first = false {
-		if err := waitReadable(int(bound.File.Fd()), s.stopCh); err != nil {
+		if err := bound.WaitReadable(s.stopCh); err != nil {
 			return
 		}
 		end := endIdle
@@ -1228,12 +1237,10 @@ func (s *Supervisor) stopUnit(u *unit.Unit, deadline time.Time) (forced bool) {
 		}
 		if !exited() {
 			// Force-kill: cgroup.kill is atomic and reaches every
-			// descendant regardless of PID reuse. Without cgroup-v2,
-			// fall back to PID + PGID SIGKILL (racy on PID reuse, but
-			// the best there is without cgroup v2).
-			if s.cgroup.Available() {
-				_ = s.cgroup.Kill(u.Name)
-			} else {
+			// descendant regardless of PID reuse. When the process is
+			// not in its cgroup, or the kill fails, fall back to PID +
+			// PGID SIGKILL (racy on PID reuse, but the best there is).
+			if !st.inCgroup || s.cgroup.Kill(u.Name) != nil {
 				_ = syscall.Kill(st.pid, syscall.SIGKILL)
 				_ = killGroup(st.pid, syscall.SIGKILL)
 			}

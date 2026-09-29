@@ -3,7 +3,6 @@
 package supervisor
 
 import (
-	"errors"
 	"syscall"
 )
 
@@ -45,43 +44,6 @@ func killGroup(pid int, sig syscall.Signal) error {
 		return syscall.EINVAL
 	}
 	return syscall.Kill(-pid, sig)
-}
-
-// waitReadable blocks until fd is readable or stop is closed. Uses
-// syscall.Select; the contract on EINTR is that the FdSet is left
-// unmodified (Linux), so we MUST gate readability on the return
-// count rather than the FdSet bits -- Go runtime preemption (SIGURG
-// since 1.14) interrupts select() routinely, and treating
-// "EINTR + bit-still-set" as readable produces phantom first-connect
-// events on every busy goroutine.
-func waitReadable(fd int, stop <-chan struct{}) error {
-	for {
-		select {
-		case <-stop:
-			return errors.New("stopped")
-		default:
-		}
-		var rfds syscall.FdSet
-		fdSet(&rfds, fd)
-		tv := syscall.Timeval{Sec: 0, Usec: 100_000}
-		n, err := syscall.Select(fd+1, &rfds, nil, nil, &tv)
-		if err != nil {
-			if err == syscall.EINTR {
-				continue
-			}
-			return err
-		}
-		if n > 0 && fdIsSet(&rfds, fd) {
-			return nil
-		}
-	}
-}
-
-func fdSet(p *syscall.FdSet, fd int) {
-	p.Bits[fd/64] |= 1 << (uint(fd) % 64)
-}
-func fdIsSet(p *syscall.FdSet, fd int) bool {
-	return p.Bits[fd/64]&(1<<(uint(fd)%64)) != 0
 }
 
 // processAlive returns true when pid has not been reaped. Uses the
