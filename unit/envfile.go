@@ -158,6 +158,7 @@ func parseEnvValue(s string) (string, error) {
 		i++
 	}
 	var b strings.Builder
+	quotedEnd := 0 // trailing whitespace before this is quoted: keep it
 	for i < len(s) {
 		c := s[i]
 		switch c {
@@ -167,6 +168,7 @@ func parseEnvValue(s string) (string, error) {
 				return "", err
 			}
 			b.WriteString(seg)
+			quotedEnd = b.Len()
 			i += n
 		case '\'':
 			seg, n, err := readSQuoted(s[i:])
@@ -174,6 +176,7 @@ func parseEnvValue(s string) (string, error) {
 				return "", err
 			}
 			b.WriteString(seg)
+			quotedEnd = b.Len()
 			i += n
 		default:
 			start := i
@@ -183,7 +186,8 @@ func parseEnvValue(s string) (string, error) {
 			b.WriteString(s[start:i])
 		}
 	}
-	return strings.TrimRightFunc(b.String(), unicode.IsSpace), nil
+	v := b.String()
+	return v[:quotedEnd] + strings.TrimRightFunc(v[quotedEnd:], unicode.IsSpace), nil
 }
 
 // readDQuoted parses one "..." segment starting at s[0]='"'. Returns

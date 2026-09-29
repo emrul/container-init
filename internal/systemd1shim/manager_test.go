@@ -219,3 +219,18 @@ func TestDedupePreservesOrder(t *testing.T) {
 		}
 	}
 }
+
+// TestEscapeUnitName: the encoding matches systemd's bus_label_escape.
+func TestEscapeUnitName(t *testing.T) {
+	for in, want := range map[string]string{
+		"my-app.service": "my_2dapp_2eservice",
+		"app_2da.scope":  "app_5f2da_2escope",
+		"1app.service":   "_31app_2eservice",
+		"a1.service":     "a1_2eservice",
+		"":               "_",
+	} {
+		if got := escapeUnitName(in); got != want {
+			t.Errorf("escapeUnitName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

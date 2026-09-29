@@ -2,6 +2,7 @@ package unit
 
 import (
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -484,4 +485,28 @@ func sliceEq(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+func TestSplitAssignments(t *testing.T) {
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{`A=1 B=2`, []string{"A=1", "B=2"}},
+		{`"A=a b" B=`, []string{"A=a b", "B="}},
+		{`A="a b"`, []string{"A=a b"}},
+		{`A='say "hi"'`, []string{`A=say "hi"`}},
+		{"A=1\tB=2", []string{"A=1", "B=2"}},
+		{`A=""`, []string{"A="}},
+		{`A=a\b`, []string{`A=a\b`}},
+	}
+	for _, tc := range cases {
+		got, err := splitAssignments(tc.in)
+		if err != nil || !slices.Equal(got, tc.want) {
+			t.Errorf("splitAssignments(%q) = %q, %v; want %q", tc.in, got, err, tc.want)
+		}
+	}
+	if _, err := splitAssignments(`A="open`); err == nil {
+		t.Error("unterminated quote accepted")
+	}
 }

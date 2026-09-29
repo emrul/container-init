@@ -445,9 +445,14 @@ func (l *loader) applyServiceSection(u *Unit, name, value string) error {
 		// documented home.
 		return l.applyStartLimit(u, name, value)
 	case "Environment":
-		// gounit's deserialiser hands us one string with quoting
-		// already collapsed; split on whitespace to get K=V pairs.
-		u.Environment = append(u.Environment, splitWords(value)...)
+		// gounit's deserialiser leaves the quoting in place: split into
+		// K=V assignments the way systemd does, so a quoted value keeps
+		// its spaces.
+		words, err := splitAssignments(value)
+		if err != nil {
+			return fmt.Errorf("Environment: %w", err)
+		}
+		u.Environment = append(u.Environment, words...)
 	case "EnvironmentFile":
 		v := strings.TrimSpace(value)
 		ref := EnvFileRef{Path: v}
@@ -582,6 +587,48 @@ func (l *loader) applyInstallSection(u *Unit, name, value string) error {
 // words separated by spaces.
 func splitWords(value string) []string {
 	return strings.Fields(value)
+}
+
+// splitAssignments splits an Environment= value into words as systemd
+// does: whitespace separates them, and "..." or '...' anywhere in a word
+// keep whitespace in it, so both "K=a b" and K="a b" are the one
+// assignment K=a b. Backslashes are kept as written: systemd's C-style
+// escapes are not interpreted, as they were not before quoting was.
+func splitAssignments(value string) ([]string, error) {
+	var words []string
+	var cur strings.Builder
+	inWord := false
+	var quote byte // 0, '"' or '\''
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		switch {
+		case quote != 0:
+			if c == quote {
+				quote = 0
+			} else {
+				cur.WriteByte(c)
+			}
+		case c == '"' || c == '\'':
+			quote = c
+			inWord = true
+		case c == ' ' || c == '\t' || c == '\n':
+			if inWord {
+				words = append(words, cur.String())
+				cur.Reset()
+				inWord = false
+			}
+		default:
+			cur.WriteByte(c)
+			inWord = true
+		}
+	}
+	if quote != 0 {
+		return nil, fmt.Errorf("unterminated quote")
+	}
+	if inWord {
+		words = append(words, cur.String())
+	}
+	return words, nil
 }
 
 // splitExec is the simple shell tokeniser for ExecStart=. Supports

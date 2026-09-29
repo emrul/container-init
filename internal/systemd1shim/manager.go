@@ -166,16 +166,21 @@ func uint32ToA(v uint32) string {
 	return string(buf[i:])
 }
 
-// escapeUnitName mirrors systemd's bus-path escaping: every char that
-// isn't [A-Za-z0-9_] becomes _XX (hex). Good enough for GetUnit's
-// return value; we never round-trip the result.
+// escapeUnitName is systemd's bus_label_escape: every byte that is not
+// [A-Za-z0-9], and a digit in first place, becomes _XX (lower-case hex),
+// and the empty name is "_". Escaping "_" too keeps it injective --
+// "app-a.scope" and "app_2da.scope" get distinct paths, and so distinct
+// state in unitSet -- and matches the paths real systemd hands out.
 func escapeUnitName(name string) string {
+	if name == "" {
+		return "_"
+	}
 	out := make([]byte, 0, len(name))
 	const hex = "0123456789abcdef"
 	for i := 0; i < len(name); i++ {
 		c := name[i]
 		switch {
-		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '_':
+		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9' && i > 0:
 			out = append(out, c)
 		default:
 			out = append(out, '_', hex[c>>4], hex[c&0x0f])

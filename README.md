@@ -350,6 +350,13 @@ Drop-ins participate in the supervisor's full lifecycle:
   container down via reverse shutdown on this unit's first failure,
   even one `Restart=` would have recovered from; `OnFailure=` fires on
   the way down. Useful for compliance gates an image author owns.
+- **Environment= / EnvironmentFile=** -- `Environment=` takes
+  whitespace-separated `K=V` assignments; `"..."` or `'...'` keep
+  whitespace in one, whether they wrap the whole assignment
+  (`"GREETING=hello world"`) or the value (`GREETING="hello world"`).
+  Backslashes are kept as written. In an `EnvironmentFile=`, whitespace
+  around a value is stripped unless it is quoted. Files override
+  `Environment=`, and a later file an earlier one, as in systemd.
 - **User= / Group= / WorkingDirectory=** -- privilege drop. Accepts
   the `${VAR:-default}` env-expansion form so per-image overrides
   flow through automatically. A `User=` unit gets `HOME`, `USER` and
