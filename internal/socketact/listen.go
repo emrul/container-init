@@ -29,10 +29,12 @@ type Bound struct {
 
 // Perm is the ownership and mode of an AF_UNIX socket node, from
 // [Socket] SocketUser= / SocketGroup= / SocketMode=. UID and GID of -1
-// leave the owner as bound (container-init's own); a zero Mode means
-// systemd's default, 0666. TCP listeners ignore it.
+// leave the owner as bound (container-init's own). Mode applies only
+// when ModeSet, so an explicit 0000 stays 0000; otherwise the node
+// gets systemd's default, 0666. TCP listeners ignore it.
 type Perm struct {
 	Mode     os.FileMode
+	ModeSet  bool
 	UID, GID int
 }
 
@@ -88,9 +90,9 @@ func applyPerm(path string, p Perm) error {
 			return err
 		}
 	}
-	mode := p.Mode
-	if mode == 0 {
-		mode = DefaultSocketMode
+	mode := DefaultSocketMode
+	if p.ModeSet {
+		mode = p.Mode
 	}
 	return os.Chmod(path, mode)
 }

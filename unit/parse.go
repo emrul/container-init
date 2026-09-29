@@ -550,7 +550,7 @@ func (l *loader) applySocketSection(u *Unit, name, value string) error {
 		if err != nil {
 			return fmt.Errorf("SocketMode: %w", err)
 		}
-		u.SocketMode = m
+		u.SocketMode, u.SocketModeSet = m, true
 	case "TriggerLimitBurst":
 		n, err := strconv.Atoi(strings.TrimSpace(value))
 		if err != nil {

@@ -336,6 +336,9 @@ Service=wide.service
 	if sock.SocketMode != 0o660 {
 		t.Errorf("SocketMode = %o, want 0660", sock.SocketMode)
 	}
+	if !sock.SocketModeSet {
+		t.Error("SocketModeSet = false for an explicit SocketMode=")
+	}
 }
 
 // TestUnknownDirectiveWarns verifies that directives outside the

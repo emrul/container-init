@@ -29,7 +29,7 @@ func TestSocketOwnership(t *testing.T) {
 			address := filepath.Join(t.TempDir(), "sock")
 			u := &unit.Unit{Name: "owned.socket", Kind: unit.KindSocket,
 				ListenStream: []unit.Listener{{Network: "unix", Address: address}},
-				SocketUser:   tc.user, SocketGroup: tc.group, SocketMode: 0o660}
+				SocketUser:   tc.user, SocketGroup: tc.group, SocketMode: 0o660, SocketModeSet: true}
 			s := auditSupervisor(t, u)
 			ok := s.bindSocket(u)
 			defer s.closeSocket(u.Name)
@@ -97,5 +97,43 @@ func TestSocketUserAloneTakesItsGroup(t *testing.T) {
 	}
 	if st.Mode().Perm() != 0o666 {
 		t.Errorf("mode = %04o, want systemd's default 0666", st.Mode().Perm())
+	}
+}
+
+// TestSocketModeFromUnitFile: SocketMode= reaches the node exactly as
+// written, 0000 included; only an omitted one gets the 0666 default.
+func TestSocketModeFromUnitFile(t *testing.T) {
+	for _, tc := range []struct {
+		name, line string
+		want       os.FileMode
+	}{
+		{"omitted", "", 0o666},
+		{"explicit 0000", "SocketMode=0000\n", 0},
+		{"explicit 0600", "SocketMode=0600\n", 0o600},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			p := filepath.Join(dir, "moded.socket")
+			address := filepath.Join(dir, "moded.sock")
+			if err := os.WriteFile(p, []byte("[Socket]\nListenStream="+address+"\n"+tc.line), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			u, _, err := unit.LoadFile(p, unit.Options{Strict: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			s := auditSupervisor(t, u)
+			if !s.bindSocket(u) {
+				t.Fatal("bind failed")
+			}
+			defer s.closeSocket(u.Name)
+			st, err := os.Lstat(address)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := st.Mode().Perm(); got != tc.want {
+				t.Errorf("mode = %04o, want %04o", got, tc.want)
+			}
+		})
 	}
 }

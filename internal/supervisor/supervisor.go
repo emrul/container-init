@@ -824,7 +824,7 @@ func (s *Supervisor) bindSocket(u *unit.Unit) bool {
 // socketPerm resolves u's SocketUser= / SocketGroup= / SocketMode=. As
 // in systemd, SocketUser= alone gives the node that user's group.
 func socketPerm(u *unit.Unit) (socketact.Perm, error) {
-	p := socketact.Perm{Mode: u.SocketMode, UID: -1, GID: -1}
+	p := socketact.Perm{Mode: u.SocketMode, ModeSet: u.SocketModeSet, UID: -1, GID: -1}
 	if u.SocketUser != "" {
 		id, err := userdb.Resolve(u.SocketUser, u.SocketGroup, "")
 		if err != nil {

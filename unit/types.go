@@ -153,7 +153,11 @@ type Unit struct {
 	ProxyTarget    string
 	SocketUser     string
 	SocketGroup    string
-	SocketMode     os.FileMode // 0 = "use kernel default"
+	// SocketMode is the AF_UNIX node's mode when SocketModeSet;
+	// otherwise the node gets systemd's default, 0666. An explicit
+	// SocketMode=0000 is kept as 0000.
+	SocketMode    os.FileMode
+	SocketModeSet bool
 	// Trigger rate limit: more than TriggerLimitBurst activations
 	// within TriggerLimitIntervalSec fails the socket. Unlike the start
 	// limit, a socket that sets neither gets systemd's defaults (20 /
