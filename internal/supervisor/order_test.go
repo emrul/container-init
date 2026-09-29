@@ -147,3 +147,32 @@ func TestRequiresIsNotAnOrdering(t *testing.T) {
 		t.Errorf("Before= did not order a first: got %v", names)
 	}
 }
+
+func socketFor(name, service string, after ...string) *unit.Unit {
+	return &unit.Unit{Name: name, Kind: unit.KindSocket, Service: service, After: after}
+}
+
+func TestSocketOrderedBeforeItsService(t *testing.T) {
+	// No After= anywhere: the socket still starts (and so stops) on the
+	// right side of the service it activates.
+	names := order(t, units(u("a.service"), socketFor("z.socket", "a.service")))
+	if indexOf(t, names, "z.socket") > indexOf(t, names, "a.service") {
+		t.Errorf("got %v, want z.socket before a.service", names)
+	}
+}
+
+func TestSocketAfterItsServiceIsACycle(t *testing.T) {
+	// The implicit socket-before-service ordering meets an explicit
+	// After= the other way: rejected before start, naming both, rather
+	// than a shutdown where each waits for the other.
+	us := units(u("a.service"), socketFor("a.socket", "a.service", "a.service"))
+	_, err := topoSort(us)
+	if err == nil {
+		t.Fatal("expected a cycle error")
+	}
+	for _, want := range []string{"a.service", "a.socket"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to name %s", err, want)
+		}
+	}
+}

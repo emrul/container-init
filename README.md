@@ -323,9 +323,12 @@ Drop-ins participate in the supervisor's full lifecycle:
   `OnFailure=` acts on it, and no unit is started once shutdown has
   begun, including an `OnFailure=` target queued just before. A
   `.socket` closes its listener in its own turn, after its service
-  (as systemd's implicit ordering has it) and every unit ordered
-  `After=` it; until then a proxy socket still reaches a running
-  helper but starts no new one. `ExecStop=` / `ExecStopPost=` are
+  and every unit ordered `After=` it; until then a proxy socket still
+  reaches a running helper but starts no new one. As in systemd, a
+  `.socket` is ordered before the service it activates whether or not
+  the service says `After=`, so a socket ordered `After=` its own
+  service is a dependency cycle and the unit set is refused at
+  startup. `ExecStop=` / `ExecStopPost=` are
   parsed but not run.
 - **ExitContainerOnFailure=true** -- fail-secure: take the whole
   container down via reverse shutdown on this unit's first failure,

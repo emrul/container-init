@@ -850,13 +850,17 @@ func (s *Supervisor) driveProxy(sock *unit.Unit, bound *socketact.Bound) {
 	// none runs; false means the socket has failed or shutdown began.
 	helper := func() (chan struct{}, bool) {
 		mu.Lock()
-		if failed.Load() || s.stopping() {
+		if failed.Load() {
 			mu.Unlock()
 			return nil, false
 		}
 		if up != nil {
 			defer mu.Unlock()
-			return up, true
+			return up, true // a running helper serves, shutdown or not
+		}
+		if s.stopping() {
+			mu.Unlock()
+			return nil, false // but none starts once shutdown began
 		}
 		if reason := s.trigger(sock, first); reason != "" {
 			failed.Store(true)
@@ -1127,23 +1131,14 @@ func (s *Supervisor) shutdown() int {
 	s.spawnGate.Lock()
 	s.noSpawn = true
 	s.spawnGate.Unlock()
-	// dependents[x] lists the units ordered After= x (Before= was
-	// folded into After= in New). topoSort rejected cycles, so every
-	// wait below ends.
+	// dependents[x] lists the units ordered after x (orderedAfter:
+	// After=, Before= folded in, and each socket before its service).
+	// topoSort rejected cycles in the same ordering, so every wait
+	// below ends.
 	dependents := make(map[string][]string, len(s.units))
-	for _, u := range s.units {
-		for _, a := range u.After {
-			if _, ok := s.byName[a]; ok {
-				dependents[a] = append(dependents[a], u.Name)
-			}
-		}
-		// A socket stops after the service it activates, as systemd's
-		// implicit Before= between them has it, whether or not the
-		// service orders itself After= the socket.
-		if u.Kind == unit.KindSocket {
-			if _, ok := s.byName[u.Service]; ok && !slices.Contains(dependents[u.Name], u.Service) {
-				dependents[u.Name] = append(dependents[u.Name], u.Service)
-			}
+	for name, deps := range orderedAfter(s.units) {
+		for _, dep := range deps {
+			dependents[dep] = append(dependents[dep], name)
 		}
 	}
 	stopped := make(map[string]chan struct{}, len(s.units))

@@ -278,3 +278,61 @@ func waitFile(t *testing.T, f string) {
 	}
 	t.Fatalf("%s never appeared", f)
 }
+
+// TestProxySocketServesDuringShutdown: while shutdown waits on a unit
+// that still uses a proxy socket, connections reach the helper that is
+// already running. No new helper starts once shutdown began.
+func TestProxySocketServesDuringShutdown(t *testing.T) {
+	dir := t.TempDir()
+	up := filepath.Join(dir, "up")
+	stopping := filepath.Join(dir, "stopping")
+	release := filepath.Join(dir, "release")
+	sock, svc := socketPair(t, unit.ActivationProxy, dir, "live")
+	helperService(t, sock, svc, filepath.Join(dir, "count"), 0)
+	svc.Environment = append(svc.Environment, socketHelperServe+"=1")
+	// The consumer uses the helper while it stops, so it orders After=
+	// the service as well as the socket.
+	consumer := shellUnit("consumer.service", fmt.Sprintf(
+		`trap 'touch %s; while [ ! -f %s ]; do sleep 0.02; done; exit 0' TERM; touch %s; sleep 60 & wait`,
+		stopping, release, up), sock.Name, svc.Name)
+	path := sock.ListenStream[0].Address
+
+	d := pid1.NewDispatcher()
+	dispStop := make(chan struct{})
+	defer close(dispStop)
+	d.Start(dispStop)
+	sup, err := New([]*unit.Unit{sock, svc, consumer}, nil, d, &cgroup.Manager{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	go sup.Run()
+	defer func() {
+		_ = os.WriteFile(release, nil, 0o600)
+		<-sup.Done()
+	}()
+	waitListening(t, sup, sock.Name)
+	waitFile(t, up)
+	if got := request(t, path); got != "ok\n" {
+		t.Fatalf("before shutdown: %q, want ok", got)
+	}
+
+	sup.Stop()
+	waitFile(t, stopping)
+	if got := request(t, path); got != "ok\n" {
+		t.Errorf("during shutdown: %q, want ok from the running helper", got)
+	}
+}
+
+// TestSocketAfterItsServiceRejected: New refuses a socket ordered
+// After= the service it activates, instead of accepting a set whose
+// shutdown would wait on itself until the stop timeout.
+func TestSocketAfterItsServiceRejected(t *testing.T) {
+	dir := t.TempDir()
+	sock, svc := socketPair(t, unit.ActivationNative, dir, "loop")
+	svc.ExecStart = []string{"/bin/sleep", "60"}
+	sock.After = []string{svc.Name}
+	d := pid1.NewDispatcher()
+	if _, err := New([]*unit.Unit{sock, svc}, nil, d, &cgroup.Manager{}); err == nil {
+		t.Fatal("New accepted a socket ordered After= its own service")
+	}
+}

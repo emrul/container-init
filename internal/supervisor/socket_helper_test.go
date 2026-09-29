@@ -10,11 +10,13 @@ import (
 
 // Environment that turns the test binary into a socket-activated
 // service: it serves one connection ("ok\n"), counts the run in
-// socketHelperCount, and exits with socketHelperExit.
+// socketHelperCount, and exits with socketHelperExit. With
+// socketHelperServe set it serves every connection until it is killed.
 const (
 	socketHelperMode  = "SUPERVISOR_TEST_SOCKET_HELPER" // "native" or a proxy endpoint path
 	socketHelperCount = "SUPERVISOR_TEST_SOCKET_COUNT"
 	socketHelperExit  = "SUPERVISOR_TEST_SOCKET_EXIT"
+	socketHelperServe = "SUPERVISOR_TEST_SOCKET_SERVE"
 )
 
 // socketHelperMain runs the helper when the environment asks for it,
@@ -36,9 +38,14 @@ func socketHelperMain() {
 		fmt.Fprintln(os.Stderr, "socket helper:", err)
 		os.Exit(2)
 	}
-	if c, err := ln.Accept(); err == nil {
-		fmt.Fprintln(c, "ok")
-		c.Close()
+	for serve := os.Getenv(socketHelperServe) != ""; ; {
+		if c, err := ln.Accept(); err == nil {
+			fmt.Fprintln(c, "ok")
+			c.Close()
+		}
+		if !serve {
+			break
+		}
 	}
 	ln.Close()
 	if f := os.Getenv(socketHelperCount); f != "" {

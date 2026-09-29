@@ -2,6 +2,8 @@ package supervisor
 
 import (
 	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/emrul/container-init/unit"
 )
@@ -47,6 +49,38 @@ func resolveBefore(units []*unit.Unit) {
 	}
 }
 
+// orderedAfter returns, for each unit, the loaded units it is ordered
+// after: its After= (with Before= already folded in by resolveBefore),
+// plus the socket that activates it -- systemd's implicit ordering of a
+// .socket before its service, which holds whether or not the service
+// says After= itself. topoSort and shutdown both order by it, so a
+// socket configured After= its own service is a cycle for both, caught
+// before anything starts rather than stalling shutdown.
+//
+// waitDeps still reads After= alone: sockets are bound before any
+// service starts, so the implicit edge has nothing to wait for then.
+func orderedAfter(units []*unit.Unit) map[string][]string {
+	loaded := make(map[string]bool, len(units))
+	for _, u := range units {
+		loaded[u.Name] = true
+	}
+	after := make(map[string][]string, len(units))
+	add := func(u, dep string) {
+		if loaded[dep] && !slices.Contains(after[u], dep) {
+			after[u] = append(after[u], dep)
+		}
+	}
+	for _, u := range units {
+		for _, dep := range u.After {
+			add(u.Name, dep)
+		}
+		if u.Kind == unit.KindSocket && loaded[u.Service] {
+			add(u.Service, u.Name)
+		}
+	}
+	return after
+}
+
 // topoSort returns units in start order: dependencies before dependents.
 // Only ordering dependencies contribute edges. Cycles are reported.
 //
@@ -56,7 +90,8 @@ func resolveBefore(units []*unit.Unit) {
 // second case a cycle.
 //
 // Before= does not contribute edges here: resolveBefore has already folded it
-// into the target's After=.
+// into the target's After=. The implicit socket-before-service ordering does
+// (see orderedAfter).
 func topoSort(units []*unit.Unit) ([]*unit.Unit, error) {
 	byName := make(map[string]*unit.Unit, len(units))
 	for _, u := range units {
@@ -67,20 +102,11 @@ func topoSort(units []*unit.Unit) ([]*unit.Unit, error) {
 	for _, u := range units {
 		indeg[u.Name] += 0
 	}
-	addEdge := func(from, to string) {
-		// "to After= from" means from must start before to.
-		if _, ok := byName[from]; !ok {
-			return
-		}
-		if _, ok := byName[to]; !ok {
-			return
-		}
-		edges[from] = append(edges[from], to)
-		indeg[to]++
-	}
-	for _, u := range units {
-		for _, dep := range u.After {
-			addEdge(dep, u.Name)
+	for name, deps := range orderedAfter(units) {
+		for _, dep := range deps {
+			// "name After= dep" means dep must start before name.
+			edges[dep] = append(edges[dep], name)
+			indeg[name]++
 		}
 	}
 
@@ -112,7 +138,15 @@ func topoSort(units []*unit.Unit) ([]*unit.Unit, error) {
 		}
 	}
 	if len(ordered) != len(units) {
-		return nil, fmt.Errorf("dependency cycle in unit set")
+		var stuck []string
+		for name, d := range indeg {
+			if d > 0 {
+				stuck = append(stuck, name)
+			}
+		}
+		slices.Sort(stuck)
+		return nil, fmt.Errorf("dependency cycle in unit set, among %s "+
+			"(a .socket is ordered before the service it activates)", strings.Join(stuck, ", "))
 	}
 	return ordered, nil
 }
