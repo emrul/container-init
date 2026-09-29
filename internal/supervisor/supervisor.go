@@ -74,6 +74,11 @@ type Supervisor struct {
 	// limits holds each unit's start-limit state, shared by every path
 	// that starts it; see allowStart.
 	limits map[string]*startLimiter
+	// running holds one lock per unit, taken by whichever path is
+	// running it -- its own loop, a socket activation, or an OnFailure=
+	// invocation -- for as long as it does, so a unit never has two
+	// processes. Fixed at New.
+	running map[string]*sync.Mutex
 	// missingReq records, for each unit whose Requires= chain reaches a
 	// unit that is not loaded, the first such name and the unit that
 	// requires it. Fixed at New; see unit.MissingRequirements.
@@ -125,9 +130,11 @@ func New(units []*unit.Unit, tracer *trace.Tracer, dispatcher *pid1.Dispatcher, 
 	}
 	ready := make(map[string]chan struct{}, len(ordered))
 	limits := make(map[string]*startLimiter, len(ordered))
+	running := make(map[string]*sync.Mutex, len(ordered))
 	for _, u := range ordered {
 		ready[u.Name] = make(chan struct{})
 		limits[u.Name] = newStartLimiter(u)
+		running[u.Name] = new(sync.Mutex)
 	}
 	return &Supervisor{
 		units:       ordered,
@@ -146,6 +153,7 @@ func New(units []*unit.Unit, tracer *trace.Tracer, dispatcher *pid1.Dispatcher, 
 		ready:       ready,
 		failed:      make(map[string]bool),
 		limits:      limits,
+		running:     running,
 		missingReq:  unit.MissingRequirements(byName),
 		wrapper:     "/proc/self/exe",
 	}, nil
@@ -270,6 +278,7 @@ func (s *Supervisor) Run() int {
 		}
 	}
 
+	bindFailed := map[string]bool{}
 	// Pass 1: bind every .socket whose conditions allow. Skipped
 	// sockets (and their attached services) immediately signal ready
 	// so dependents that After= / Requires= them don't block forever.
@@ -293,7 +302,11 @@ func (s *Supervisor) Run() int {
 			}
 			continue
 		}
-		s.bindSocket(u)
+		if !s.bindSocket(u) {
+			s.bindFailed(u)
+			bindFailed[u.Name] = true
+			continue
+		}
 		s.signalReady(u.Name)
 		// Socket-attached service is "ready" the moment the socket
 		// listens -- that's the contract of socket activation: clients
@@ -305,9 +318,13 @@ func (s *Supervisor) Run() int {
 
 	// Pass 2: start every non-socket-attached, non-skipped .service.
 	socketAttached := map[string]bool{}
+	boundFor := map[string]bool{}
 	for _, u := range s.units {
 		if u.Kind == unit.KindSocket && !u.Condition.Skip {
 			socketAttached[u.Service] = true
+			if !bindFailed[u.Name] {
+				boundFor[u.Service] = true
+			}
 		}
 	}
 	for _, u := range s.units {
@@ -321,8 +338,11 @@ func (s *Supervisor) Run() int {
 			continue
 		}
 		if socketAttached[u.Name] {
-			log.Printf("unit %s: socket-activated (driven by attached .socket)", u.Name)
-			// Pass 1 already signalled ready for socket-attached services.
+			// Pass 1 already settled socket-attached services: ready
+			// once their socket bound, failed if it could not.
+			if boundFor[u.Name] {
+				log.Printf("unit %s: socket-activated (driven by attached .socket)", u.Name)
+			}
 			continue
 		}
 		if u.Type == unit.TypeOneshot && s.invokedOnlyByOnFailure(u.Name) {
@@ -387,6 +407,11 @@ func (s *Supervisor) runService(u *unit.Unit) {
 		}
 		return
 	}
+	// Hold u's run lock for the whole loop, restarts included. It is
+	// released before u's failure is handled, so an OnFailure= that
+	// names u itself finds it inactive and starts it again.
+	release := s.claim(u)
+	defer release()
 	first := true
 	// Type=simple/forking: signal ready post-fork (the service is
 	// "started"; long-running, never exits cleanly). The hook fires
@@ -409,6 +434,7 @@ func (s *Supervisor) runService(u *unit.Unit) {
 		default:
 		}
 		if !s.allowStart(u) {
+			release()
 			s.startLimitHit(u)
 			return
 		}
@@ -428,12 +454,14 @@ func (s *Supervisor) runService(u *unit.Unit) {
 		}
 
 		if failed && u.ExitContainerOnFailure {
+			release()
 			s.unitFailed(u, exitErr)
 			log.Printf("unit %s: ExitContainerOnFailure -- initiating reverse shutdown", u.Name)
 			s.Stop()
 			return
 		}
 		if !shouldRestart(u, failed) {
+			release()
 			if failed {
 				s.unitFailed(u, exitErr)
 			}
@@ -447,6 +475,16 @@ func (s *Supervisor) runService(u *unit.Unit) {
 			}
 		}
 	}
+}
+
+// claim takes u's run lock, waiting while another path runs u (an
+// OnFailure= invocation, or a second socket activating the same
+// service). The returned release may be called more than once.
+func (s *Supervisor) claim(u *unit.Unit) (release func()) {
+	run := s.running[u.Name]
+	run.Lock()
+	var once sync.Once
+	return func() { once.Do(run.Unlock) }
 }
 
 // unitFailed handles a unit that failed and will not be started
@@ -485,6 +523,25 @@ func (s *Supervisor) fireOnFailure(name string) {
 		log.Printf("OnFailure: %s not invoked: shutting down", name)
 		return
 	}
+	// The handler's own dependencies apply as to any start: a missing
+	// or failed requirement keeps it from running, and it waits for
+	// the units it is ordered after.
+	if dep, ok := s.waitDeps(u); !ok {
+		if dep != "" {
+			s.logDependencyFailed(u, dep)
+		}
+		return
+	}
+	// Starting a unit that is already active does nothing, as in
+	// systemd: two failures sharing a handler that is still running
+	// get the one invocation.
+	run := s.running[name]
+	if !run.TryLock() {
+		log.Printf("OnFailure: %s not invoked: already active", name)
+		s.event(name, "onfailure_coalesced", nil)
+		return
+	}
+	defer run.Unlock()
 	if !s.allowStart(u) {
 		// A refused invocation does not chain to the target's own
 		// OnFailure=, just as a failed one below does not: with a
@@ -728,17 +785,17 @@ func (s *Supervisor) finish(u *unit.Unit, state *serviceState, es pid1.ExitStatu
 }
 
 // bindSocket opens the listener for u and starts the right activation
-// goroutine.
-func (s *Supervisor) bindSocket(u *unit.Unit) {
+// goroutine. Reports false if the listener could not be opened.
+func (s *Supervisor) bindSocket(u *unit.Unit) bool {
 	if len(u.ListenStream) == 0 {
-		return
+		return true
 	}
 	l := u.ListenStream[0] // one ListenStream per .socket
 	bound, err := socketact.Bind(l)
 	if err != nil {
 		log.Printf("socket %s: bind failed: %v", u.Name, err)
 		s.event(u.Name, "bind_failed", map[string]any{"err": err.Error()})
-		return
+		return false
 	}
 	s.mu.Lock()
 	s.bounds[u.Name] = bound
@@ -753,6 +810,22 @@ func (s *Supervisor) bindSocket(u *unit.Unit) {
 		go s.driveNative(u, bound)
 	case unit.ActivationProxy:
 		go s.driveProxy(u, bound)
+	}
+	return true
+}
+
+// bindFailed fails a socket that could not bind, as systemd does: units
+// that Requires= and are ordered after it do not start, and neither
+// does its service, which requires its socket; the socket's OnFailure=
+// fires.
+func (s *Supervisor) bindFailed(sock *unit.Unit) {
+	s.markFailed(sock.Name)
+	if svc, ok := s.byName[sock.Service]; ok {
+		s.logDependencyFailed(svc, sock.Name)
+		s.markFailed(svc.Name)
+	}
+	for _, target := range sock.OnFailure {
+		go s.fireOnFailure(target)
 	}
 }
 
@@ -954,6 +1027,10 @@ func (s *Supervisor) runHelperLoop(svc *unit.Unit, helperUp chan struct{}, check
 // Restart= policy, until it stops for good. extra is the listener to
 // pass in native mode, nil in proxy mode.
 func (s *Supervisor) runActivated(svc *unit.Unit, extra *socketact.Bound) activationEnd {
+	// As in runService, svc's run lock is held for the activation and
+	// released before its failure is handled.
+	release := s.claim(svc)
+	defer release()
 	for {
 		select {
 		case <-s.stopCh:
@@ -961,6 +1038,7 @@ func (s *Supervisor) runActivated(svc *unit.Unit, extra *socketact.Bound) activa
 		default:
 		}
 		if !s.allowStart(svc) {
+			release()
 			s.startLimitHit(svc)
 			return endStartLimit
 		}
@@ -971,11 +1049,13 @@ func (s *Supervisor) runActivated(svc *unit.Unit, extra *socketact.Bound) activa
 			return endStopped
 		}
 		if failed && svc.ExitContainerOnFailure {
+			release()
 			s.unitFailed(svc, exitErr)
 			s.Stop()
 			return endExit
 		}
 		if !shouldRestart(svc, failed) {
+			release()
 			if failed {
 				s.unitFailed(svc, exitErr)
 			}

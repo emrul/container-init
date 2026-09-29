@@ -300,7 +300,12 @@ Drop-ins participate in the supervisor's full lifecycle:
   start limit. A failure the unit restarts from does not fire it, as in
   systemd -- so under `Restart=always` / `Restart=on-failure` it fires
   only once a start limit runs out. Chains across the core/drop-in
-  boundary identically.
+  boundary identically. The target's own dependencies apply: it waits
+  for the units it orders `After=`, and a missing or failed
+  requirement keeps it from running, as for any other start. A target
+  that is already active is not started a second time, as in systemd:
+  two failures that share a handler still running from the first get
+  one invocation (`OnFailure: X not invoked: already active`).
 - **Socket activation** -- a `.socket` starts its service on the first
   connection. Once the service stops and `Restart=` will not start it
   again (a clean exit, or a failure), the socket listens again and the
@@ -313,7 +318,10 @@ Drop-ins participate in the supervisor's full lifecycle:
   defaults for `Accept=no`, 20 activations per 2s, so a service that
   exits without taking its connection cannot be restarted as fast as it
   exits; `0` in either disables it. A failed socket fires its own
-  `OnFailure=`.
+  `OnFailure=`. A socket that cannot bind at boot fails at once: its
+  `OnFailure=` fires, and its service, which needs it, fails too, so
+  units that `Requires=` and order `After=` either one are not
+  started.
 - **Reverse shutdown** -- on SIGTERM / SIGINT, or when
   `ExitContainerOnFailure=` fires, units stop in reverse dependency
   order, as in systemd: a unit is stopped once every unit ordered

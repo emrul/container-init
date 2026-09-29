@@ -466,7 +466,8 @@ func TestOnFailureCycleWithSpentLimits(t *testing.T) {
 	}
 	// a (Type=simple, so it runs at boot although it is an OnFailure=
 	// target) spends its budget and fires b, which spends its own. c
-	// fires b too; one of the two invocations is refused, and a
+	// fires b too; one of the two invocations is refused -- by b's
+	// start limit, or as already active if b is still running -- and a
 	// chaining refusal would fire a, refused in turn, and so on.
 	a := failing("a.service", "b.service", 1)
 	a.Type = unit.TypeSimple
@@ -476,8 +477,9 @@ func TestOnFailureCycleWithSpentLimits(t *testing.T) {
 	runUnits(t, a, b, c)
 
 	time.Sleep(300 * time.Millisecond)
-	if n := strings.Count(logs.String(), "start limit hit"); n != 1 {
-		t.Errorf("%d refused OnFailure= invocation(s), want 1; log:\n%s", n, logs.String())
+	out := logs.String()
+	if n := strings.Count(out, "start limit hit") + strings.Count(out, "already active"); n != 1 {
+		t.Errorf("%d refused OnFailure= invocation(s), want 1; log:\n%s", n, out)
 	}
 }
 
@@ -563,5 +565,56 @@ func TestMissingRequirementNotStarted(t *testing.T) {
 	defer sup.mu.Unlock()
 	if !sup.failed["orphan.service"] || !sup.failed["chained.service"] || !sup.failed["indirect.service"] || sup.failed["ordered.service"] {
 		t.Errorf("failed = %v, want orphan, chained and indirect only", sup.failed)
+	}
+}
+
+// TestOnFailureNamingItself: a unit whose OnFailure= names itself is
+// inactive once it has failed, so the invocation starts it again rather
+// than being dropped as already active. The handler run does not chain.
+func TestOnFailureNamingItself(t *testing.T) {
+	count := filepath.Join(t.TempDir(), "count")
+	self := &unit.Unit{
+		Name:      "self.service",
+		Kind:      unit.KindService,
+		Type:      unit.TypeSimple,
+		ExecStart: []string{"/bin/sh", "-c", countingScript(count, "exit 1")},
+		OnFailure: []string{"self.service"},
+	}
+	runUnits(t, self)
+	waitCount(t, count, 2)
+	if n := readCount(count); n != 2 {
+		t.Errorf("self.service ran %d time(s), want 2 (boot, then its OnFailure=)", n)
+	}
+}
+
+// TestBindFailureFailsSocketAndService: a socket that cannot bind fires
+// its OnFailure=, and fails its service, so a unit that Requires= and is
+// ordered after the service does not start.
+func TestBindFailureFailsSocketAndService(t *testing.T) {
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer occupied.Close()
+	dir := t.TempDir()
+	handlerCount := filepath.Join(dir, "handler")
+	consumerMark := filepath.Join(dir, "consumer")
+	sock := &unit.Unit{Name: "busy.socket", Kind: unit.KindSocket, Service: "busy.service",
+		ListenStream: []unit.Listener{{Network: "tcp", Address: occupied.Addr().String()}},
+		OnFailure:    []string{"handler.service"}}
+	svc := &unit.Unit{Name: "busy.service", Kind: unit.KindService, Type: unit.TypeSimple,
+		ExecStart: []string{"/bin/sleep", "60"}}
+	handler := &unit.Unit{Name: "handler.service", Kind: unit.KindService, Type: unit.TypeOneshot,
+		ExecStart: []string{"/bin/sh", "-c", countingScript(handlerCount, "exit 0")}}
+	consumer := &unit.Unit{Name: "consumer.service", Kind: unit.KindService, Type: unit.TypeOneshot,
+		After: []string{svc.Name}, Requires: []string{svc.Name}, ExecStart: []string{"/bin/touch", consumerMark}}
+	s := runUnits(t, sock, svc, handler, consumer)
+	waitSettled(t, s, consumer.Name)
+	waitCount(t, handlerCount, 1)
+	if n := readCount(handlerCount); n != 1 {
+		t.Errorf("socket's OnFailure= ran %d time(s), want 1", n)
+	}
+	if _, err := os.Stat(consumerMark); err == nil {
+		t.Error("consumer ran although the service it requires lost its socket")
 	}
 }

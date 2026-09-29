@@ -4,6 +4,7 @@ package supervisor
 
 import (
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -45,6 +46,48 @@ func auditWait(t *testing.T, what string, f func() bool) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %s", what)
+}
+
+func TestAuditConcurrentOnFailureShutdownOwnsEveryProcess(t *testing.T) {
+	u := &unit.Unit{Name: "shared-handler.service", Kind: unit.KindService, Type: unit.TypeOneshot,
+		ExecStart: []string{"/bin/sleep", "60"}}
+	s := auditSupervisor(t, u)
+	firstDone, secondDone := make(chan struct{}), make(chan struct{})
+	go func() { s.fireOnFailure(u.Name); close(firstDone) }()
+	var first int
+	auditWait(t, "first failure handler", func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if st := s.services[u.Name]; st != nil {
+			first = st.pid
+		}
+		return first > 0
+	})
+	defer func() { _ = syscall.Kill(first, syscall.SIGKILL); <-firstDone }()
+	go func() { s.fireOnFailure(u.Name); close(secondDone) }()
+	// The second invocation may legitimately coalesce or serialize after a fix.
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		s.mu.Lock()
+		latest := s.services[u.Name].pid
+		s.mu.Unlock()
+		if latest != first {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	s.Stop()
+	s.shutdown()
+	// Give the dispatcher time to reap anything actually signalled.
+	time.Sleep(50 * time.Millisecond)
+	if processAlive(first) {
+		t.Errorf("first OnFailure process %d survived shutdown after its state record was replaced", first)
+	}
+	select {
+	case <-secondDone:
+	case <-time.After(time.Second):
+		t.Error("second invocation did not finish")
+	}
 }
 
 func TestAuditCompletedSpawnsReleaseOutputDescriptors(t *testing.T) {
@@ -190,5 +233,35 @@ func TestAuditShutdownDeadlineIncludesSpawnGate(t *testing.T) {
 	<-drained
 	if exceeded {
 		t.Error("100ms shutdown deadline was exceeded while a spawn's trace write was blocked")
+	}
+}
+
+func TestAuditFailedSocketBlocksRequiredService(t *testing.T) {
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer occupied.Close()
+	mark := filepath.Join(t.TempDir(), "consumer-ran")
+	sock := &unit.Unit{Name: "occupied.socket", Kind: unit.KindSocket, Service: "helper.service",
+		ListenStream: []unit.Listener{{Network: "tcp", Address: occupied.Addr().String()}}}
+	helper := &unit.Unit{Name: "helper.service", Kind: unit.KindService, Type: unit.TypeSimple, ExecStart: []string{"/bin/sleep", "60"}}
+	consumer := &unit.Unit{Name: "consumer.service", Kind: unit.KindService, Type: unit.TypeOneshot,
+		After: []string{sock.Name}, Requires: []string{sock.Name}, ExecStart: []string{"/bin/touch", mark}}
+	s := runUnits(t, sock, helper, consumer)
+	waitSettled(t, s, consumer.Name)
+	if _, err := os.Stat(mark); err == nil {
+		t.Error("consumer ran although its ordered Requires= socket failed to bind")
+	}
+}
+
+func TestAuditOnFailureHonoursMissingRequirement(t *testing.T) {
+	mark := filepath.Join(t.TempDir(), "handler-ran")
+	handler := &unit.Unit{Name: "handler.service", Kind: unit.KindService, Type: unit.TypeOneshot,
+		Requires: []string{"not-installed.service"}, ExecStart: []string{"/bin/touch", mark}}
+	s := auditSupervisor(t, handler)
+	s.fireOnFailure(handler.Name)
+	if _, err := os.Stat(mark); err == nil {
+		t.Error("OnFailure handler ran despite a missing Requires= unit")
 	}
 }
