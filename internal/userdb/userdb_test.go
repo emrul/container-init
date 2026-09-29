@@ -211,3 +211,16 @@ func TestResolveEnvFileMissingFallsBack(t *testing.T) {
 		t.Error("alice resolved from the default file although the override now exists")
 	}
 }
+
+func TestGID(t *testing.T) {
+	withFakeFiles(t, samplePasswd, sampleGroup)
+	if gid, err := GID("7777"); err != nil || gid != 7777 {
+		t.Errorf("GID(7777) = %d, %v; want 7777 with or without a group entry", gid, err)
+	}
+	if _, err := GID("no-such-group"); err == nil {
+		t.Error("GID of an unknown group name succeeded")
+	}
+	if gid, err := GID("audio"); err != nil || gid != 29 {
+		t.Errorf("GID(audio) = %d, %v; want 29", gid, err)
+	}
+}

@@ -17,7 +17,7 @@ import (
 // be waited on, and WaitReadable must stop once the listener is closed.
 func TestWaitReadableHighDescriptor(t *testing.T) {
 	addr := filepath.Join(t.TempDir(), "sock")
-	b, err := Bind(unit.Listener{Network: "unix", Address: addr})
+	b, err := Bind(unit.Listener{Network: "unix", Address: addr}, Perm{UID: -1, GID: -1})
 	if err != nil {
 		t.Fatal(err)
 	}

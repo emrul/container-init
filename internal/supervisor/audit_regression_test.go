@@ -3,12 +3,14 @@
 package supervisor
 
 import (
+	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -18,6 +20,7 @@ import (
 	"github.com/emrul/container-init/internal/cgroup"
 	"github.com/emrul/container-init/internal/pid1"
 	"github.com/emrul/container-init/internal/trace"
+	"github.com/emrul/container-init/internal/userdb"
 	"github.com/emrul/container-init/unit"
 )
 
@@ -115,6 +118,80 @@ func TestAuditCompletedSpawnsReleaseOutputDescriptors(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if after := count(); after > before+4 {
 		t.Errorf("32 completed spawns left %d additional descriptors (before=%d after=%d)", after-before, before, after)
+	}
+}
+
+func TestAuditGroupWithoutUserIsEnforced(t *testing.T) {
+	u := &unit.Unit{Name: "group-only.service", Kind: unit.KindService, Type: unit.TypeOneshot}
+	out := filepath.Join(t.TempDir(), "gid")
+	u.ExecStart = []string{"/bin/sh", "-c", "id -g > " + out}
+	u.Group = strconv.Itoa(os.Getegid() + 1)
+	s := auditSupervisor(t, u)
+	err := s.spawnAndWait(u, nil, nil)
+	if os.Geteuid() != 0 {
+		if err == nil {
+			t.Error("non-root supervisor silently ran a unit requesting a different Group=")
+		}
+		return
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(got)) != u.Group {
+		t.Errorf("Group=%s ran with gid %s", u.Group, strings.TrimSpace(string(got)))
+	}
+}
+
+func TestAuditUserIdentityEnvironmentWinsDuplicates(t *testing.T) {
+	t.Setenv("HOME", "/inherited")
+	t.Setenv("USER", "inherited")
+	t.Setenv("LOGNAME", "inherited")
+	id, err := userdb.Resolve(strconv.Itoa(os.Geteuid()), strconv.Itoa(os.Getegid()), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(t.TempDir(), "identity")
+	u := &unit.Unit{Name: "identity-env.service", Kind: unit.KindService, Type: unit.TypeOneshot,
+		User: strconv.Itoa(os.Geteuid()), Group: strconv.Itoa(os.Getegid()),
+		Environment: []string{"HOME=/directive", "USER=directive", "LOGNAME=directive"},
+		ExecStart:   []string{"/bin/sh", "-c", `printf '%s|%s|%s' "$HOME" "$USER" "$LOGNAME" > ` + out}}
+	s := auditSupervisor(t, u)
+	if err := s.spawnAndWait(u, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := fmt.Sprintf("%s|%s|%s", id.Home, id.Username, id.Username); string(got) != want {
+		t.Errorf("identity environment = %q, want %q (spawnAndWait promises User= wins)", got, want)
+	}
+}
+
+func TestAuditSocketModeIsEnforced(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "private.socket")
+	address := filepath.Join(dir, "private.sock")
+	if err := os.WriteFile(p, []byte("[Socket]\nListenStream="+address+"\nSocketMode=0600\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	u, warnings, err := unit.LoadFile(p, unit.Options{Strict: true})
+	if err != nil || len(warnings) != 0 {
+		t.Fatalf("load: %v, warnings=%v", err, warnings)
+	}
+	s := auditSupervisor(t, u)
+	s.bindSocket(u)
+	defer s.closeSocket(u.Name)
+	st, err := os.Stat(address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode().Perm() != 0o600 {
+		t.Errorf("SocketMode=0600 produced %04o", st.Mode().Perm())
 	}
 }
 

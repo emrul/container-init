@@ -318,7 +318,11 @@ Drop-ins participate in the supervisor's full lifecycle:
   defaults for `Accept=no`, 20 activations per 2s, so a service that
   exits without taking its connection cannot be restarted as fast as it
   exits; `0` in either disables it. A failed socket fires its own
-  `OnFailure=`. A socket that cannot bind at boot fails at once: its
+  `OnFailure=`. A Unix socket's node gets `SocketMode=` (default
+  0666, as in systemd) and is owned by `SocketUser=` / `SocketGroup=`
+  when set; `SocketUser=` alone gives it that user's group. Without
+  root, container-init cannot give it another owner, and the socket
+  fails. A socket that cannot bind at boot fails at once: its
   `OnFailure=` fires, and its service, which needs it, fails too, so
   units that `Requires=` and order `After=` either one are not
   started.
@@ -348,7 +352,11 @@ Drop-ins participate in the supervisor's full lifecycle:
   the way down. Useful for compliance gates an image author owns.
 - **User= / Group= / WorkingDirectory=** -- privilege drop. Accepts
   the `${VAR:-default}` env-expansion form so per-image overrides
-  flow through automatically.
+  flow through automatically. A `User=` unit gets `HOME`, `USER` and
+  `LOGNAME` from the resolved user, over any value in the inherited
+  environment, `Environment=` or `EnvironmentFile=`. `Group=` without
+  `User=` changes only the group, as in systemd: the unit runs as
+  container-init's own uid with that gid and no supplementary groups.
 
   When container-init itself runs without root (the container is
   started with `--user`), it cannot switch identity at all. A `User=`

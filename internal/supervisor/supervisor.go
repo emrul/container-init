@@ -615,6 +615,22 @@ func (s *Supervisor) spawnAndWait(u *unit.Unit, extra *socketact.Bound, onSpawne
 	if u.WorkingDirectory != "" {
 		cmd.Dir = u.WorkingDirectory
 	}
+	if u.User == "" && u.Group != "" {
+		// Group= alone changes only the group, as in systemd: the uid
+		// stays container-init's own, and supplementary groups are
+		// dropped. Without root, the gid must already be ours.
+		gid, err := userdb.GID(u.Group)
+		if err != nil {
+			return s.startFailed(u, fmt.Errorf("privilege drop: %w", err))
+		}
+		switchID, err := credentialPlan(s.euid, s.egid, userdb.Identity{UID: s.euid, GID: gid})
+		if err != nil {
+			return s.startFailed(u, err)
+		}
+		if switchID {
+			applyCredential(cmd.SysProcAttr, s.euid, gid, nil)
+		}
+	}
 	if u.User != "" {
 		id, err := userdb.Resolve(u.User, u.Group, "")
 		if err != nil {
@@ -791,12 +807,44 @@ func (s *Supervisor) bindSocket(u *unit.Unit) bool {
 		return true
 	}
 	l := u.ListenStream[0] // one ListenStream per .socket
-	bound, err := socketact.Bind(l)
+	perm, err := socketPerm(u)
+	var bound *socketact.Bound
+	if err == nil {
+		bound, err = socketact.Bind(l, perm)
+	}
 	if err != nil {
 		log.Printf("socket %s: bind failed: %v", u.Name, err)
 		s.event(u.Name, "bind_failed", map[string]any{"err": err.Error()})
 		return false
 	}
+	s.listening(u, bound)
+	return true
+}
+
+// socketPerm resolves u's SocketUser= / SocketGroup= / SocketMode=. As
+// in systemd, SocketUser= alone gives the node that user's group.
+func socketPerm(u *unit.Unit) (socketact.Perm, error) {
+	p := socketact.Perm{Mode: u.SocketMode, UID: -1, GID: -1}
+	if u.SocketUser != "" {
+		id, err := userdb.Resolve(u.SocketUser, u.SocketGroup, "")
+		if err != nil {
+			return p, fmt.Errorf("SocketUser=: %w", err)
+		}
+		p.UID, p.GID = int(id.UID), int(id.GID)
+	} else if u.SocketGroup != "" {
+		gid, err := userdb.GID(u.SocketGroup)
+		if err != nil {
+			return p, fmt.Errorf("SocketGroup=: %w", err)
+		}
+		p.GID = int(gid)
+	}
+	return p, nil
+}
+
+// listening records u's bound listener and starts its activation
+// goroutine.
+func (s *Supervisor) listening(u *unit.Unit, bound *socketact.Bound) {
+	l := u.ListenStream[0]
 	s.mu.Lock()
 	s.bounds[u.Name] = bound
 	s.mu.Unlock()
@@ -811,7 +859,6 @@ func (s *Supervisor) bindSocket(u *unit.Unit) bool {
 	case unit.ActivationProxy:
 		go s.driveProxy(u, bound)
 	}
-	return true
 }
 
 // bindFailed fails a socket that could not bind, as systemd does: units
@@ -1447,18 +1494,15 @@ func errString(err error) string {
 	return err.Error()
 }
 
-// setEnv replaces (or appends) "key=value" in env. Used to overwrite
-// HOME / USER / LOGNAME on privilege drop so the dropped-priv child
-// sees the resolved identity, not whatever container-init inherited
-// as PID 1.
+// setEnv sets key to value in env, removing every other entry for key:
+// the child's environment is deduplicated with the last entry winning,
+// so replacing only the first would lose to a later duplicate. Used to
+// overwrite HOME / USER / LOGNAME on privilege drop so the dropped-priv
+// child sees the resolved identity, not whatever container-init
+// inherited as PID 1 or the unit set.
 func setEnv(env []string, key, value string) []string {
 	prefix := key + "="
-	for i, e := range env {
-		if strings.HasPrefix(e, prefix) {
-			env[i] = prefix + value
-			return env
-		}
-	}
+	env = slices.DeleteFunc(env, func(e string) bool { return strings.HasPrefix(e, prefix) })
 	return append(env, prefix+value)
 }
 

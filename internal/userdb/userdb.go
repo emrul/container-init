@@ -138,15 +138,11 @@ func Resolve(user, group, homeOverride string) (Identity, error) {
 	}
 
 	if group != "" {
-		if gid, err := strconv.ParseUint(group, 10, 32); err == nil {
-			id.GID = uint32(gid)
-		} else {
-			ge, err := lookupGroupByName(group)
-			if err != nil {
-				return Identity{}, fmt.Errorf("userdb: group %q: %w", group, err)
-			}
-			id.GID = ge.gid
+		gid, err := GID(group)
+		if err != nil {
+			return Identity{}, err
 		}
+		id.GID = gid
 	}
 
 	if homeOverride != "" {
@@ -175,6 +171,19 @@ func UID(user string) (uint32, error) {
 		return 0, fmt.Errorf("userdb: user %q: %w", user, err)
 	}
 	return e.uid, nil
+}
+
+// GID resolves a group= value -- a gid, or a name in the group file --
+// the way Resolve resolves Group=.
+func GID(group string) (uint32, error) {
+	if gid, err := strconv.ParseUint(group, 10, 32); err == nil {
+		return uint32(gid), nil
+	}
+	e, err := lookupGroupByName(group)
+	if err != nil {
+		return 0, fmt.Errorf("userdb: group %q: %w", group, err)
+	}
+	return e.gid, nil
 }
 
 type passwdEntry struct {
