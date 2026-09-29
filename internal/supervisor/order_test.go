@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/emrul/container-init/internal/pid1"
 	"github.com/emrul/container-init/unit"
 )
 
@@ -174,5 +175,31 @@ func TestSocketAfterItsServiceIsACycle(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error = %q, want it to name %s", err, want)
 		}
+	}
+}
+
+func TestCheckOrder(t *testing.T) {
+	// The --validate check agrees with New's: a sound set passes, and
+	// both an explicit cycle and one through a socket's implicit
+	// ordering are reported.
+	cases := []struct {
+		name  string
+		units []*unit.Unit
+		cycle bool
+	}{
+		{"sound", units(u("a.service"), u("b.service", "a.service"), socketFor("a.socket", "a.service")), false},
+		{"Before= cycle", units(before("a.service", "b.service"), before("b.service", "a.service")), true},
+		{"socket After= its service", units(u("a.service"), socketFor("a.socket", "a.service", "a.service")), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := CheckOrder(tc.units)
+			if (err != nil) != tc.cycle {
+				t.Errorf("CheckOrder = %v, want cycle %v", err, tc.cycle)
+			}
+			if _, newErr := New(tc.units, nil, pid1.NewDispatcher(), nil); (newErr != nil) != (err != nil) {
+				t.Errorf("CheckOrder = %v but New = %v; they must agree", err, newErr)
+			}
+		})
 	}
 }

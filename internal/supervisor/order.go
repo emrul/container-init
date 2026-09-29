@@ -8,6 +8,28 @@ import (
 	"github.com/emrul/container-init/unit"
 )
 
+// orderUnits returns units in start order, or the reason they cannot be
+// ordered. It is the check New makes before anything starts, and the one
+// CheckOrder makes for --validate.
+//
+// Before= is folded into the target's After= first, in place, so that
+// both topoSort and waitDeps honour it without either needing to know it
+// exists.
+func orderUnits(units []*unit.Unit) ([]*unit.Unit, error) {
+	resolveBefore(units)
+	return topoSort(units)
+}
+
+// CheckOrder reports whether units can be ordered -- no dependency
+// cycle, counting a socket's implicit ordering before its service -- by
+// the same check New makes, so --validate catches at build time what
+// would otherwise fail at startup. Like New, it folds Before= into
+// After= in place.
+func CheckOrder(units []*unit.Unit) error {
+	_, err := orderUnits(units)
+	return err
+}
+
 // resolveBefore rewrites every "u Before= X" into the equivalent
 // "X After= u", in place, and must run before topoSort.
 //
@@ -139,14 +161,17 @@ func topoSort(units []*unit.Unit) ([]*unit.Unit, error) {
 	}
 	if len(ordered) != len(units) {
 		var stuck []string
+		hint := ""
 		for name, d := range indeg {
 			if d > 0 {
 				stuck = append(stuck, name)
+				if byName[name].Kind == unit.KindSocket {
+					hint = " (a .socket is ordered before the service it activates)"
+				}
 			}
 		}
 		slices.Sort(stuck)
-		return nil, fmt.Errorf("dependency cycle in unit set, among %s "+
-			"(a .socket is ordered before the service it activates)", strings.Join(stuck, ", "))
+		return nil, fmt.Errorf("dependency cycle in unit set, among %s%s", strings.Join(stuck, ", "), hint)
 	}
 	return ordered, nil
 }

@@ -111,10 +111,7 @@ func New(units []*unit.Unit, tracer *trace.Tracer, dispatcher *pid1.Dispatcher, 
 	if cg == nil {
 		cg = &cgroup.Manager{}
 	}
-	// Fold Before= into the target's After= before ordering, so that both
-	// topoSort and waitDeps honour it without either needing to know it exists.
-	resolveBefore(units)
-	ordered, err := topoSort(units)
+	ordered, err := orderUnits(units)
 	if err != nil {
 		return nil, err
 	}

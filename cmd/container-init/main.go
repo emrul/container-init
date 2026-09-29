@@ -78,6 +78,12 @@ func main() {
 		fmt.Fprintf(os.Stdout,
 			"container-init validate: units=%d warnings=%d overrides=%d strict=%v\n",
 			len(units), len(warnings), len(overrides), *strict)
+		// The ordering check startup makes: a cycle fails the boot
+		// with 64, so it fails validation the same way, strict or not.
+		if err := supervisor.CheckOrder(units); err != nil {
+			fmt.Fprintf(os.Stderr, "container-init: validate: %v\n", err)
+			os.Exit(64)
+		}
 		// Strict mode already exits non-zero above on any warning; in
 		// non-strict mode we still want a non-zero exit if any warning
 		// was raised, so build pipelines catch directive drift.

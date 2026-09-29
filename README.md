@@ -95,8 +95,12 @@ directive / section, unsupported value form, missing requirement) into
 a fatal load error -- useful in CI to catch typos before they ship.
 
 The `--validate` flag loads + parses units, prints a summary, and
-exits without supervising. Combined with `--strict-units`, this is a
-build-time sanity check.
+exits without supervising. It also makes the ordering check startup
+makes: a dependency cycle in `After=` / `Before=`, including one
+through a `.socket`'s implicit ordering before its service, exits 64
+as it would at boot, with or without `--strict-units`; any load
+warning exits 1. Combined with `--strict-units`, this is a build-time
+sanity check.
 
 The `--stop-timeout` flag (default `8s`) bounds the whole reverse
 shutdown: once it has passed, every unit still running is killed at
