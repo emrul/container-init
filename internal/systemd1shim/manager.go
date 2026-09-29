@@ -43,10 +43,11 @@ type manager struct {
 	emitter signalEmitter
 	log     logger
 	nextJob atomic.Uint32 // monotonic job id; 0 reserved
+	units   *unitSet      // units started through the shim
 }
 
 func newManager(emitter signalEmitter, log logger) *manager {
-	return &manager{emitter: emitter, log: log}
+	return &manager{emitter: emitter, log: log, units: newUnitSet(maxUnits)}
 }
 
 func (m *manager) logf(format string, args ...any) {
@@ -63,6 +64,9 @@ func (m *manager) StartTransientUnit(name, mode string, properties []property, a
 	id := m.nextJob.Add(1)
 	jobPath := dbus.ObjectPath("/org/freedesktop/systemd1/job/" + uint32ToA(id))
 	m.logf("StartTransientUnit: unit=%q mode=%q props=%d aux=%d -> %s", name, mode, len(properties), len(aux), jobPath)
+	// Record the unit before JobRemoved goes out: a client may read
+	// its properties as soon as it sees the job finish.
+	m.units.add(name)
 
 	// JobNew and JobRemoved are fire-and-forget; if the emitter is
 	// disconnected mid-call the client will time out, which is the
@@ -78,12 +82,15 @@ func (m *manager) StartTransientUnit(name, mode string, properties []property, a
 
 // StartUnit / StopUnit / ReloadUnit / RestartUnit: clients that aren't
 // systemd-run sometimes call these. Same shape: synthesize a job,
-// emit JobRemoved, return path.
+// emit JobRemoved, return path. Start and Restart record the unit as
+// active; Stop forgets it.
 func (m *manager) StartUnit(name, mode string) (dbus.ObjectPath, *dbus.Error) {
+	m.units.add(name)
 	return m.synthesizeJob("StartUnit", name, mode)
 }
 
 func (m *manager) StopUnit(name, mode string) (dbus.ObjectPath, *dbus.Error) {
+	m.units.remove(name)
 	return m.synthesizeJob("StopUnit", name, mode)
 }
 
@@ -92,6 +99,7 @@ func (m *manager) ReloadUnit(name, mode string) (dbus.ObjectPath, *dbus.Error) {
 }
 
 func (m *manager) RestartUnit(name, mode string) (dbus.ObjectPath, *dbus.Error) {
+	m.units.add(name)
 	return m.synthesizeJob("RestartUnit", name, mode)
 }
 
@@ -110,10 +118,11 @@ func (m *manager) synthesizeJob(op, name, mode string) (dbus.ObjectPath, *dbus.E
 
 // GetUnit returns a deterministic object path. Real systemd would
 // return the existing unit's path or NoSuchUnit; we return a derived
-// path because callers that follow up with property reads will get an
-// empty result rather than a hard error.
+// path for any name because callers that follow up with property
+// reads get an empty result rather than a hard error. Units the shim
+// started answer those reads as active (see propertyStub).
 func (m *manager) GetUnit(name string) (dbus.ObjectPath, *dbus.Error) {
-	return dbus.ObjectPath(string(managerPath) + "/unit/" + escapeUnitName(name)), nil
+	return unitPath(name), nil
 }
 
 // ListUnits returns an empty list. Real systemd returns

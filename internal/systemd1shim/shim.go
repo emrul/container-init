@@ -124,8 +124,9 @@ func (s *Shim) dialAndServe(ctx context.Context, addr string) error {
 	// errors, systemd-run logs "Failed to request invocation ID"
 	// and exits non-zero -- which Ptyxis (its caller) reports as a
 	// failed terminal. Export a properties stub on the subtree that
-	// returns zero values for the few properties real callers read.
-	if err := conn.ExportSubtree(newPropertyStub(),
+	// answers the few properties real callers read: a small table
+	// for units the manager started, zero values otherwise.
+	if err := conn.ExportSubtree(newPropertyStub(mgr.units),
 		managerPath+"/unit", "org.freedesktop.DBus.Properties"); err != nil {
 		return fmt.Errorf("export unit properties: %w", err)
 	}

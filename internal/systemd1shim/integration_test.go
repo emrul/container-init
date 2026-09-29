@@ -122,5 +122,34 @@ func TestStartTransientUnitOverWire(t *testing.T) {
 		t.Fatal("empty job path")
 	}
 	t.Logf("got job path %s", jobPath)
+
+	// Chrome's sequence for its app scope: GetUnit, then GetAll on the
+	// Unit interface at the returned path. Its file dialogs wait for
+	// ActiveState "active".
+	var uPath dbus.ObjectPath
+	if err := mgr.Call("org.freedesktop.systemd1.Manager.GetUnit", 0, "test.scope").Store(&uPath); err != nil {
+		t.Fatalf("GetUnit: %v", err)
+	}
+	var got map[string]dbus.Variant
+	unit := client.Object("org.freedesktop.systemd1", uPath)
+	if err := unit.Call("org.freedesktop.DBus.Properties.GetAll", 0,
+		"org.freedesktop.systemd1.Unit").Store(&got); err != nil {
+		t.Fatalf("GetAll: %v", err)
+	}
+	if v := got["ActiveState"]; v.Value() != "active" {
+		t.Errorf("ActiveState = %v, want active (all: %v)", v.Value(), got)
+	}
+	if v := got["Id"]; v.Value() != "test.scope" {
+		t.Errorf("Id = %v, want test.scope", v.Value())
+	}
+	// systemd-run's InvocationID read still answers on the same path.
+	var inv dbus.Variant
+	if err := unit.Call("org.freedesktop.DBus.Properties.Get", 0,
+		"org.freedesktop.systemd1.Unit", "InvocationID").Store(&inv); err != nil {
+		t.Fatalf("Get InvocationID: %v", err)
+	}
+	if inv.Signature().String() != "ay" {
+		t.Errorf("InvocationID signature = %s, want ay", inv.Signature())
+	}
 }
 

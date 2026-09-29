@@ -183,6 +183,12 @@ one is already on the bus.
 - `Get(InvocationID)` on `/org/freedesktop/systemd1/unit/*` returns
   an empty `ay` (the "no recorded invocation" sentinel) so
   `systemd-run`'s post-StartTransientUnit query doesn't abort.
+- Units started through the shim (`StartTransientUnit`, `StartUnit`,
+  `RestartUnit`; `StopUnit` forgets them) answer `Get`/`GetAll` on
+  `org.freedesktop.systemd1.Unit` with `Id`, `LoadState=loaded`,
+  `ActiveState=active` and `SubState=running`. Chrome and Chromium
+  start an `app-…-<pid>.scope` and hold their file dialogs until it
+  reads back as active. The shim remembers the last 1024 such units.
 - Everything else returns zero values or empty arrays.
 
 Callers that read property values for anything other than

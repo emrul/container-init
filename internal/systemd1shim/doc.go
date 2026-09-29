@@ -3,7 +3,8 @@
 // systemd-run (notably Ptyxis, which wraps every shell with
 // `systemd-run --user --scope`). The shim is a *compatibility surface*:
 // it returns success without creating cgroups, enforcing resource
-// limits, or persisting unit state. Properties like Slice=,
+// limits, or persisting unit state beyond the names of the units it
+// started (so they read back as active). Properties like Slice=,
 // MemoryMax=, CPUQuota= are accepted and ignored.
 //
 // Two ways to run it:
