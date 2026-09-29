@@ -95,7 +95,9 @@ func TestSpawnStartsInsideUnitCgroup(t *testing.T) {
 	if got := cgroupOf(t, string(pid)); got != leaf {
 		t.Errorf("early child is in %q, want %q", got, leaf)
 	}
-	if !sup.spawnIntoCgroupOK {
+	// Through the Once: reading the field directly races the probe,
+	// which runs in the spawning goroutine.
+	if !sup.canSpawnIntoCgroup() {
 		t.Error("probe did not enable spawning into the cgroup")
 	}
 }
@@ -177,7 +179,7 @@ func seccompFallbackScenario(t *testing.T) {
 	if s := strings.TrimPrefix(string(got), "0::"); s != leaf {
 		t.Errorf("unit is in %q, want %q (placed after spawn)", s, leaf)
 	}
-	if sup.spawnIntoCgroupOK {
+	if sup.canSpawnIntoCgroup() {
 		t.Error("probe enabled spawning into the cgroup despite clone3 being denied")
 	}
 }

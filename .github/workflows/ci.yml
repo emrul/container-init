@@ -15,6 +15,9 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go test ./...
+      # The race detector needs cgo; the runner has a C compiler. The
+      # supervisor tests run here as the non-root runner user.
+      - run: go test -race ./...
       - run: go vet ./...
       # Vendored upstream code keeps its own formatting.
       - name: gofmt
@@ -39,7 +42,9 @@ jobs:
   # (glibc's pthread_create cannot survive its filter). The runner gives
   # neither, so build the tests static and run them as root in a
   # privileged container with its own cgroup namespace -- the same
-  # position container-init is in as PID 1.
+  # position container-init is in as PID 1. The container is also
+  # disposable, which the cgroup-failure audit test needs: it mounts
+  # over the cgroup tree and is opted in with CONTAINER_INIT_AUDIT_PRIVILEGED.
   supervisor-privileged:
     runs-on: ubuntu-latest
     steps:
@@ -52,9 +57,11 @@ jobs:
         run: |
           set -o pipefail
           docker run --rm --privileged --cgroupns=private \
+            -e CONTAINER_INIT_AUDIT_PRIVILEGED=1 \
             -v "$PWD":/w -w /w/internal/supervisor ubuntu:24.04 \
             /w/supervisor.test -test.v | tee test.log
           # These must run, not skip.
-          for t in TestSpawnStartsInsideUnitCgroup TestSeccompDeniedCloneIntoCgroupFallsBack TestWrapperRunsAsUnitUser; do
+          for t in TestSpawnStartsInsideUnitCgroup TestSeccompDeniedCloneIntoCgroupFallsBack TestWrapperRunsAsUnitUser \
+                   TestAuditCgroupPlacementFailureStillKillsProcess TestSocketUserAloneTakesItsGroup; do
             grep -q -- "--- PASS: $t " test.log || { echo "::error::$t did not pass"; exit 1; }
           done
