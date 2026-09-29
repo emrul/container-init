@@ -1,7 +1,7 @@
 # Design: unit-state file and `container-init health`
 
-Status: proposal
-Date: 2026-09-29
+Status: accepted
+Date: 2026-09-29 (revised 2026-09-30 for the lifecycle-audit fixes)
 Origin: R10 in workspaces-core-images `design/container-init-requests.md`
 
 ## Summary
@@ -109,8 +109,12 @@ seconds.
   it; it says nothing then.
 - `runs`: how many times the unit has been started since boot, by any
   path (its own loop, its socket, an `OnFailure=` trigger); for a
-  socket, how many times it was bound. Counted when the start is
-  attempted, so a start that fails with `resources` counts. `runs` 0
+  socket, how many times it was bound. Counted when the start limit
+  admits the start, so a start that fails with `resources` counts,
+  and one the start limit refuses does not. An `OnFailure=` trigger
+  that finds its target already running is dropped (logged "already
+  active", as systemd ignores a start of an active unit) and does not
+  count either. `runs` 0
   is the only reliable "has not started"; `since` is not, because
   whole-second timestamps can coincide and it marks state changes, not
   runs.
@@ -119,8 +123,12 @@ seconds.
 - `since`: when `active`/`sub` last changed; PID 1's start for a unit
   that has not changed.
 - `never`, on a unit that will not start this boot: `condition` (a
-  failed `Condition*=`), `dependency` (a `Requires=` unit failed), or
-  `missing-requirement` (a `Requires=` unit is not loaded).
+  failed `Condition*=`), `dependency` (a `Requires=` unit failed, or,
+  for a socket-activated service, a socket of its failed to bind), or
+  `missing-requirement` (a `Requires=` unit is not loaded). A failed
+  unit stays failed for the rest of the boot, so this is final. An
+  `OnFailure=` target gets it when a trigger finds one of its own
+  requirements failed or missing: every later trigger would too.
 - `activation`, on a unit something else starts: `socket` (its socket
   starts it on the first connection) or `on-failure` (it runs only
   when a unit naming it in `OnFailure=` fails).
@@ -177,12 +185,15 @@ Services follow the same rule: a clean exit under `Restart=always` is
   keeps it listening and fails each start job; container-init fails
   the socket (`result: dependency`) and closes its listener, since the
   service can never start this boot.
-- **Several sockets for one service are not coordinated.** Nothing
-  rejects two sockets whose `Service=` names the same unit, and each
-  drives it on its own, so the service can run twice under one name.
-  The file has one entry per unit and cannot show that; `sockets`
-  lists both, and `health` requires all of them. No known image does
-  this.
+- **A native socket must be its service's only socket.** A native
+  activation passes the service only its own listener, so container-
+  init refuses, at startup and in `--validate`, a unit set where a
+  native socket shares its service with any other socket; systemd
+  instead passes the service all of its sockets. Several proxy sockets
+  may share a service. Every unit has at most one process (a start
+  while it runs waits, or for an `OnFailure=` trigger is dropped), so
+  one entry per unit is the whole truth; `sockets` then lists every
+  proxy socket, and `health` requires all of them.
 - **`Restart=always` on a oneshot is accepted.** systemd refuses it
   at load time (it allows only `no` and `on-failure` for
   `Type=oneshot`; worth confirming against the systemd version you
@@ -199,10 +210,6 @@ listener, when the service hits its start limit, when the service's
 requirement failed, or when its own trigger limit is spent
 (`TriggerLimitBurst=` / `TriggerLimitIntervalSec=`, default 20 per
 2 s).
-
-Coordinating or rejecting several sockets for one service changes
-supervision behaviour; it is tracked as a separate change, not part of
-this design.
 
 ## Heartbeat
 
@@ -276,9 +283,22 @@ what the image's own probes are for.
   PID 1 logs a warning once: that user can replace the file and forge
   the report. Writing stays safe (the exclusive temp file and rename
   never follow a planted name), only the contents cannot be trusted.
+- `os.CreateTemp` creates the file 0600; the writer sets 0644 with
+  `Chmod` on the open file, before the rename, so no mode or owner is
+  ever set by path.
 - A write that fails (disk full, read-only filesystem) is logged once
   and retried on the next change or heartbeat. PID 1 keeps
   supervising and never exits over it.
+- Writing never holds up supervision, as for the trace. A state change
+  only marks the state dirty and signals the writer through a channel
+  of capacity 1 with a non-blocking send; the writer, alone, takes the
+  snapshot and does the I/O. A writer stuck in I/O (a hung disk) costs
+  a stale file, which the heartbeat's `written` then shows, never a
+  stuck unit.
+- At shutdown, `pid1.stopping` is written as soon as shutdown begins,
+  and the final write, with every unit stopped, is attempted within
+  reverse shutdown's own deadline (the one given to the tracer): PID
+  1 waits for it no longer than that, and adds no time of its own.
 
 Pick a path in a directory only PID 1's uid can write:
 
@@ -362,8 +382,9 @@ and needs no privileges beyond reading the file.
   `serviceState.restarts` is never incremented today.
 - `runs` is incremented where a start is attempted, next to
   `allowStart`, so every start path counts it once.
-- One writer goroutine owns the file: state changes signal it, it
-  coalesces them and runs the heartbeat. The dispatcher gains a ping
+- One writer goroutine owns the file: state changes signal it without
+  blocking (see [File safety](#file-safety)), it coalesces them and
+  runs the heartbeat. The dispatcher gains a ping
   channel in its loop's `select` for check 2, answered between
   drains.
 - `service` comes from the parsed socket unit (`u.Service`, already
@@ -394,8 +415,13 @@ and needs no privileges beyond reading the file.
   stem: the socket's `service` and the service's `sockets` name each
   other, and `health --require` on either follows the other. A socket
   whose `Service=` is not loaded: `health --require` on it exits 1.
-  Two sockets for one service: `sockets` lists both, and requiring
-  the service fails while either socket is not `active`.
+  Two proxy sockets for one service: `sockets` lists both, and
+  requiring the service fails while either socket is not `active`.
+- An `OnFailure=` target triggered while it is still running: the
+  second trigger leaves `runs` unchanged. One whose own `Requires=`
+  unit has failed: `never: "dependency"`, `runs` 0.
+- A socket that cannot bind: the socket is `failed`/`resources`, and
+  its service shows `never: "dependency"`.
 - A socket-activated service that exits cleanly: the socket stays
   `active`/`listening` and `health --require` on either exits 0. One
   that fails under `Restart=no`: the socket still listens, and
@@ -419,5 +445,7 @@ and needs no privileges beyond reading the file.
 - A missing state-file directory is created 0755; an existing one is
   left alone.
 - With the flag unset, nothing is written.
+- With the writer blocked in I/O (a test hook), units still start and
+  stop, and shutdown returns within its deadline.
 - `health`: exits 1 on a stale `written`, on `stopping`, on a required
   unit that is missing, and on a missing or malformed file.
