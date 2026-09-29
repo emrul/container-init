@@ -94,7 +94,8 @@ seconds.
   and `Restart=` is off or its start limit was hit. A service waiting
   out `RestartSec=` is `activating`/`auto-restart`.
 - `sub`: services `dead`, `start`, `running`, `exited`,
-  `auto-restart`, `stop`, `failed`; sockets `listening` or `failed`.
+  `auto-restart`, `stop`, `failed`; sockets `dead` (not bound yet, or
+  closed by shutdown), `listening` or `failed`.
   There is no socket `running`: in native mode PID 1 cannot see
   connections, and the attached service's own entry already says
   whether it is up.
@@ -106,7 +107,10 @@ seconds.
   `service-start-limit-hit` (its service hit its start limit) or
   `dependency` (a unit its service requires failed), systemd's words
   where it has them. `success` while `runs` is 0, as systemd reports
-  it; it says nothing then.
+  it; it says nothing then. A run ended by reverse shutdown leaves
+  `result` as it was: being stopped is not a failed run, as for
+  `Restart=` and `OnFailure=`. A unit already `failed` stays `failed`
+  through shutdown; every other stopped unit ends `inactive`/`dead`.
 - `runs`: how many times the unit has been started since boot, by any
   path (its own loop, its socket, an `OnFailure=` trigger); for a
   socket, how many times it was bound. Counted when the start limit

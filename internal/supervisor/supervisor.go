@@ -29,6 +29,7 @@ import (
 	"github.com/emrul/container-init/internal/execwrap"
 	"github.com/emrul/container-init/internal/pid1"
 	"github.com/emrul/container-init/internal/socketact"
+	"github.com/emrul/container-init/internal/statefile"
 	"github.com/emrul/container-init/internal/trace"
 	"github.com/emrul/container-init/internal/userdb"
 	"github.com/emrul/container-init/unit"
@@ -83,6 +84,11 @@ type Supervisor struct {
 	// unit that is not loaded, the first such name and the unit that
 	// requires it. Fixed at New; see unit.MissingRequirements.
 	missingReq map[string]unit.MissingRequirement
+	// status is every unit's reported state (see state.go), guarded by
+	// mu; changed signals the state writer, never blocking.
+	status  map[string]*statefile.Unit
+	started time.Time
+	changed chan struct{}
 	// cgroupProbe decides, once, whether children can be spawned
 	// straight into their cgroup; see canSpawnIntoCgroup.
 	cgroupProbe       sync.Once
@@ -128,9 +134,11 @@ func New(units []*unit.Unit, tracer *trace.Tracer, dispatcher *pid1.Dispatcher, 
 	for _, u := range ordered {
 		byName[u.Name] = u
 	}
+	skipSocketsOfSkippedServices(ordered, byName)
 	ready := make(map[string]chan struct{}, len(ordered))
 	limits := make(map[string]*startLimiter, len(ordered))
 	running := make(map[string]*sync.Mutex, len(ordered))
+	started := time.Now()
 	for _, u := range ordered {
 		ready[u.Name] = make(chan struct{})
 		limits[u.Name] = newStartLimiter(u)
@@ -155,6 +163,9 @@ func New(units []*unit.Unit, tracer *trace.Tracer, dispatcher *pid1.Dispatcher, 
 		limits:      limits,
 		running:     running,
 		missingReq:  unit.MissingRequirements(byName),
+		status:      initStatus(ordered, started),
+		started:     started,
+		changed:     make(chan struct{}, 1),
 		wrapper:     "/proc/self/exe",
 	}, nil
 }
@@ -261,6 +272,13 @@ func (s *Supervisor) logDependencyFailed(u *unit.Unit, dep string) {
 	}
 	log.Printf("unit %s: not started: required unit %s %s", u.Name, dep, reason)
 	s.event(u.Name, "dependency_failed", map[string]any{"dependency": dep, "reason": reason})
+	// A failed unit stays failed, and a missing one missing, for the
+	// rest of the boot: u will not start.
+	never := statefile.NeverDependency
+	if _, known := s.byName[dep]; !known {
+		never = statefile.NeverMissingRequirement
+	}
+	s.recordNever(u.Name, never)
 }
 
 // Run starts every non-skipped unit and blocks until Stop is invoked
@@ -282,16 +300,11 @@ func (s *Supervisor) Run() int {
 	// Pass 1: bind every .socket whose conditions allow. Skipped
 	// sockets (and their attached services) immediately signal ready
 	// so dependents that After= / Requires= them don't block forever.
-	// A socket whose service is skipped is skipped too: binding it
-	// would let the first client start a service whose conditions
-	// said no (Pass 2 logs the service's own skip).
+	// A socket whose service is skipped was skipped too, by New (Pass 2
+	// logs the service's own skip).
 	for _, u := range s.units {
 		if u.Kind != unit.KindSocket {
 			continue
-		}
-		if svc, ok := s.byName[u.Service]; ok && svc.Condition.Skip && !u.Condition.Skip {
-			u.Condition.Skip = true
-			u.Condition.Reason = fmt.Sprintf("service %s skipped", svc.Name)
 		}
 		if u.Condition.Skip {
 			log.Printf("unit %s: skipped (%s)", u.Name, u.Condition.Reason)
@@ -317,14 +330,11 @@ func (s *Supervisor) Run() int {
 	}
 
 	// Pass 2: start every non-socket-attached, non-skipped .service.
-	socketAttached := map[string]bool{}
+	socketAttached := attachedServices(s.units)
 	boundFor := map[string]bool{}
 	for _, u := range s.units {
-		if u.Kind == unit.KindSocket && !u.Condition.Skip {
-			socketAttached[u.Service] = true
-			if !bindFailed[u.Name] {
-				boundFor[u.Service] = true
-			}
+		if u.Kind == unit.KindSocket && !u.Condition.Skip && !bindFailed[u.Name] {
+			boundFor[u.Service] = true
 		}
 	}
 	for _, u := range s.units {
@@ -345,7 +355,7 @@ func (s *Supervisor) Run() int {
 			}
 			continue
 		}
-		if u.Type == unit.TypeOneshot && s.invokedOnlyByOnFailure(u.Name) {
+		if deferredOnFailure(s.units, u) {
 			log.Printf("unit %s: deferred (OnFailure target only)", u.Name)
 			s.signalReady(u.Name)
 			continue
@@ -367,12 +377,44 @@ func (s *Supervisor) Run() int {
 	return s.shutdown()
 }
 
-func (s *Supervisor) invokedOnlyByOnFailure(name string) bool {
-	for _, u := range s.units {
-		for _, t := range u.OnFailure {
-			if t == name {
-				return true
-			}
+// skipSocketsOfSkippedServices skips a socket whose service is
+// skipped: binding it would let the first client start a service whose
+// conditions said no. Done in New, so the start plan -- and the state
+// the file first reports -- is fixed before anything starts.
+func skipSocketsOfSkippedServices(units []*unit.Unit, byName map[string]*unit.Unit) {
+	for _, u := range units {
+		if u.Kind != unit.KindSocket || u.Condition.Skip {
+			continue
+		}
+		if svc, ok := byName[u.Service]; ok && svc.Condition.Skip {
+			u.Condition.Skip = true
+			u.Condition.Reason = fmt.Sprintf("service %s skipped", svc.Name)
+		}
+	}
+}
+
+// attachedServices returns the services some non-skipped socket
+// activates: Run leaves starting them to their sockets.
+func attachedServices(units []*unit.Unit) map[string]bool {
+	attached := map[string]bool{}
+	for _, u := range units {
+		if u.Kind == unit.KindSocket && !u.Condition.Skip {
+			attached[u.Service] = true
+		}
+	}
+	return attached
+}
+
+// deferredOnFailure reports whether Run leaves oneshot u to OnFailure=:
+// it is named in some unit's OnFailure=, and nothing else starts it.
+// Run checks skipped and socket-attached services first.
+func deferredOnFailure(units []*unit.Unit, u *unit.Unit) bool {
+	if u.Type != unit.TypeOneshot {
+		return false
+	}
+	for _, other := range units {
+		if slices.Contains(other.OnFailure, u.Name) {
+			return true
 		}
 	}
 	return false
@@ -427,13 +469,14 @@ func (s *Supervisor) runService(u *unit.Unit) {
 			}
 		}
 	}
-	for {
+	for restart := false; ; restart = true {
 		select {
 		case <-s.stopCh:
+			s.recordStopped(u.Name)
 			return
 		default:
 		}
-		if !s.allowStart(u) {
+		if !s.admitStart(u, restart) {
 			release()
 			s.startLimitHit(u)
 			return
@@ -442,6 +485,7 @@ func (s *Supervisor) runService(u *unit.Unit) {
 		failed := exitErr != nil
 		s.event(u.Name, "exited", map[string]any{"failed": failed, "err": errString(exitErr)})
 		if s.stopping() {
+			s.recordStopped(u.Name)
 			return // stopped by reverse shutdown: not a failure
 		}
 
@@ -454,13 +498,16 @@ func (s *Supervisor) runService(u *unit.Unit) {
 		}
 
 		if failed && u.ExitContainerOnFailure {
+			s.recordExit(u, exitErr, false)
 			release()
 			s.unitFailed(u, exitErr)
 			log.Printf("unit %s: ExitContainerOnFailure -- initiating reverse shutdown", u.Name)
 			s.Stop()
 			return
 		}
-		if !shouldRestart(u, failed) {
+		again := shouldRestart(u, failed)
+		s.recordExit(u, exitErr, again)
+		if !again {
 			release()
 			if failed {
 				s.unitFailed(u, exitErr)
@@ -471,6 +518,7 @@ func (s *Supervisor) runService(u *unit.Unit) {
 			select {
 			case <-time.After(u.RestartSec):
 			case <-s.stopCh:
+				s.recordStopped(u.Name)
 				return
 			}
 		}
@@ -542,13 +590,14 @@ func (s *Supervisor) fireOnFailure(name string) {
 		return
 	}
 	defer run.Unlock()
-	if !s.allowStart(u) {
+	if !s.admitStart(u, false) {
 		// A refused invocation does not chain to the target's own
 		// OnFailure=, just as a failed one below does not: with a
 		// cycle (A -> B -> A) and both limits spent, the two would
 		// otherwise fire each other forever without starting anything.
 		log.Printf("OnFailure: %s not invoked: start limit hit (%d starts within %v)",
 			name, u.StartLimitBurst, u.StartLimitIntervalSec)
+		s.recordFailed(name, statefile.ResultStartLimitHit)
 		s.event(name, "start_limit_hit", map[string]any{
 			"burst": u.StartLimitBurst, "interval_ms": u.StartLimitIntervalSec.Milliseconds(),
 		})
@@ -561,9 +610,11 @@ func (s *Supervisor) fireOnFailure(name string) {
 	log.Printf("OnFailure: invoking %s", name)
 	s.event(name, "onfailure_invoke", nil)
 	exitErr := s.spawnAndWait(u, nil, nil)
-	if errors.Is(exitErr, errStopping) {
+	if errors.Is(exitErr, errStopping) || s.stopping() {
+		s.recordStopped(name)
 		return
 	}
+	s.recordExit(u, exitErr, false)
 	failed := exitErr != nil
 	s.event(name, "onfailure_exited", map[string]any{"failed": failed, "err": errString(exitErr)})
 	if u.ExitContainerOnFailure {
@@ -770,6 +821,11 @@ func (s *Supervisor) spawnAndWait(u *unit.Unit, extra *socketact.Bound, onSpawne
 		s.finish(u, state, <-exitCh)
 		return s.startFailed(u, errors.New(msg))
 	}
+	// The service is running. A oneshot stays activating for its whole
+	// run: it is done, not active, once it exits.
+	if u.Type != unit.TypeOneshot {
+		s.setState(u.Name, statefile.ActiveActive, statefile.SubRunning)
+	}
 
 	if onSpawned != nil {
 		onSpawned()
@@ -788,7 +844,13 @@ func (s *Supervisor) finish(u *unit.Unit, state *serviceState, es pid1.ExitStatu
 	state.exited = true
 	state.lastExit = es
 	state.lastErr = exitErr
+	// A process stopped by reverse shutdown was not a failed run: as
+	// for Restart= and OnFailure=, its exit is not a result.
+	if st := s.status[u.Name]; st != nil && !s.stopping() {
+		st.Result = runResult(es)
+	}
 	s.mu.Unlock()
+	s.stateChanged()
 	// Best-effort orphan cleanup. With the process in its cgroup we own
 	// an atomic "kill everything in this cgroup" lever and use it; on
 	// restart the cgroup will be re-populated cleanly by the next
@@ -848,6 +910,10 @@ func (s *Supervisor) listening(u *unit.Unit, bound *socketact.Bound) {
 	s.mu.Lock()
 	s.bounds[u.Name] = bound
 	s.mu.Unlock()
+	s.update(u.Name, func(st *statefile.Unit) {
+		st.Runs++
+		st.Active, st.Sub = statefile.ActiveActive, statefile.SubListening
+	})
 	log.Printf("socket %s: bound %s/%s -> %s (mode=%s)",
 		u.Name, l.Network, l.Address, u.Service, u.ActivationMode)
 	s.event(u.Name, "bound", map[string]any{
@@ -867,6 +933,7 @@ func (s *Supervisor) listening(u *unit.Unit, bound *socketact.Bound) {
 // fires.
 func (s *Supervisor) bindFailed(sock *unit.Unit) {
 	s.markFailed(sock.Name)
+	s.recordFailed(sock.Name, statefile.ResultResources)
 	if svc, ok := s.byName[sock.Service]; ok {
 		s.logDependencyFailed(svc, sock.Name)
 		s.markFailed(svc.Name)
@@ -890,16 +957,22 @@ const (
 // afterActivation says what a socket does once its service's
 // activation ended with end: listen again, fail with reason, or
 // neither because the container is going down.
-func afterActivation(svc *unit.Unit, end activationEnd) (rearm bool, failReason string) {
+func afterActivation(svc *unit.Unit, end activationEnd) (rearm bool, fail *socketFailure) {
 	switch end {
 	case endIdle:
-		return true, ""
+		return true, nil
 	case endStartLimit:
-		return false, svc.Name + " hit its start limit"
+		return false, &socketFailure{svc.Name + " hit its start limit", statefile.ResultServiceStartLimitHit}
 	case endDependency:
-		return false, svc.Name + " cannot start: a unit it requires failed"
+		return false, &socketFailure{svc.Name + " cannot start: a unit it requires failed", statefile.ResultDependency}
 	}
-	return false, ""
+	return false, nil
+}
+
+// socketFailure is why a socket fails: the logged reason, and the
+// result its state records.
+type socketFailure struct {
+	reason, result string
 }
 
 // driveNative waits for the listener to become readable, then execs
@@ -934,15 +1007,15 @@ func (s *Supervisor) driveNative(sock *unit.Unit, bound *socketact.Bound) {
 			}
 		}
 		if end == endIdle {
-			if reason := s.trigger(sock, first); reason != "" {
-				s.socketFailed(sock, bound, reason)
+			if fail := s.trigger(sock, first); fail != nil {
+				s.socketFailed(sock, bound, fail)
 				return
 			}
 			end = s.runActivated(svc, bound)
 		}
-		rearm, reason := afterActivation(svc, end)
-		if reason != "" {
-			s.socketFailed(sock, bound, reason)
+		rearm, fail := afterActivation(svc, end)
+		if fail != nil {
+			s.socketFailed(sock, bound, fail)
 		}
 		if !rearm {
 			return
@@ -988,10 +1061,10 @@ func (s *Supervisor) driveProxy(sock *unit.Unit, bound *socketact.Bound) {
 			mu.Unlock()
 			return nil, false // but none starts once shutdown began
 		}
-		if reason := s.trigger(sock, first); reason != "" {
+		if fail := s.trigger(sock, first); fail != nil {
 			failed.Store(true)
 			mu.Unlock()
-			s.socketFailed(sock, bound, reason)
+			s.socketFailed(sock, bound, fail)
 			return nil, false
 		}
 		ch := make(chan struct{})
@@ -1001,17 +1074,17 @@ func (s *Supervisor) driveProxy(sock *unit.Unit, bound *socketact.Bound) {
 		mu.Unlock()
 		go func() {
 			end := s.runHelperLoop(svc, ch, checkDeps)
-			rearm, reason := afterActivation(svc, end)
+			rearm, fail := afterActivation(svc, end)
 			// Idle or failed in one step: a connection sees either the
 			// helper gone and the socket usable, or the socket failed.
 			mu.Lock()
 			up = nil
-			if reason != "" {
+			if fail != nil {
 				failed.Store(true)
 			}
 			mu.Unlock()
-			if reason != "" {
-				s.socketFailed(sock, bound, reason)
+			if fail != nil {
+				s.socketFailed(sock, bound, fail)
 			}
 			if rearm {
 				s.listeningAgain(sock, svc)
@@ -1078,13 +1151,14 @@ func (s *Supervisor) runActivated(svc *unit.Unit, extra *socketact.Bound) activa
 	// released before its failure is handled.
 	release := s.claim(svc)
 	defer release()
-	for {
+	for restart := false; ; restart = true {
 		select {
 		case <-s.stopCh:
+			s.recordStopped(svc.Name)
 			return endStopped
 		default:
 		}
-		if !s.allowStart(svc) {
+		if !s.admitStart(svc, restart) {
 			release()
 			s.startLimitHit(svc)
 			return endStartLimit
@@ -1093,15 +1167,19 @@ func (s *Supervisor) runActivated(svc *unit.Unit, extra *socketact.Bound) activa
 		failed := exitErr != nil
 		s.event(svc.Name, "exited", map[string]any{"failed": failed, "err": errString(exitErr)})
 		if s.stopping() {
+			s.recordStopped(svc.Name)
 			return endStopped
 		}
 		if failed && svc.ExitContainerOnFailure {
+			s.recordExit(svc, exitErr, false)
 			release()
 			s.unitFailed(svc, exitErr)
 			s.Stop()
 			return endExit
 		}
-		if !shouldRestart(svc, failed) {
+		again := shouldRestart(svc, failed)
+		s.recordExit(svc, exitErr, again)
+		if !again {
 			release()
 			if failed {
 				s.unitFailed(svc, exitErr)
@@ -1112,6 +1190,7 @@ func (s *Supervisor) runActivated(svc *unit.Unit, extra *socketact.Bound) activa
 			select {
 			case <-time.After(svc.RestartSec):
 			case <-s.stopCh:
+				s.recordStopped(svc.Name)
 				return endStopped
 			}
 		}
@@ -1119,18 +1198,18 @@ func (s *Supervisor) runActivated(svc *unit.Unit, extra *socketact.Bound) activa
 }
 
 // trigger counts one activation of sock against its trigger limit. It
-// returns why the socket must fail when the limit is spent, or "".
-func (s *Supervisor) trigger(sock *unit.Unit, first bool) string {
+// returns why the socket must fail when the limit is spent, or nil.
+func (s *Supervisor) trigger(sock *unit.Unit, first bool) *socketFailure {
 	if !s.allowStart(sock) {
-		return fmt.Sprintf("trigger limit hit (%d activations within %v)",
-			sock.TriggerLimitBurst, sock.TriggerLimitIntervalSec)
+		return &socketFailure{fmt.Sprintf("trigger limit hit (%d activations within %v)",
+			sock.TriggerLimitBurst, sock.TriggerLimitIntervalSec), statefile.ResultTriggerLimitHit}
 	}
 	if first {
 		s.event(sock.Name, "first_connect", nil)
 	} else {
 		s.event(sock.Name, "triggered", nil)
 	}
-	return ""
+	return nil
 }
 
 // listeningAgain logs that sock is back to waiting for a connection
@@ -1142,9 +1221,10 @@ func (s *Supervisor) listeningAgain(sock, svc *unit.Unit) {
 
 // socketFailed closes a socket that will not start its service again.
 // As in systemd, the socket's own OnFailure= fires.
-func (s *Supervisor) socketFailed(sock *unit.Unit, bound *socketact.Bound, reason string) {
-	log.Printf("socket %s: failed: %s; closing the listener", sock.Name, reason)
-	s.event(sock.Name, "socket_failed", map[string]any{"reason": reason})
+func (s *Supervisor) socketFailed(sock *unit.Unit, bound *socketact.Bound, fail *socketFailure) {
+	log.Printf("socket %s: failed: %s; closing the listener", sock.Name, fail.reason)
+	s.event(sock.Name, "socket_failed", map[string]any{"reason": fail.reason})
+	s.recordFailed(sock.Name, fail.result)
 	s.mu.Lock()
 	delete(s.bounds, sock.Name)
 	s.mu.Unlock()
@@ -1211,6 +1291,7 @@ func (s *Supervisor) startLimitHit(u *unit.Unit) {
 		"burst": u.StartLimitBurst, "interval_ms": u.StartLimitIntervalSec.Milliseconds(),
 	})
 	s.markFailed(u.Name)
+	s.recordFailed(u.Name, statefile.ResultStartLimitHit)
 	for _, target := range u.OnFailure {
 		go s.fireOnFailure(target)
 	}
@@ -1329,6 +1410,7 @@ func (s *Supervisor) closeSocket(name string) {
 	s.mu.Unlock()
 	if b != nil {
 		b.Close()
+		s.recordStopped(name)
 	}
 }
 
@@ -1348,7 +1430,9 @@ func (s *Supervisor) stopUnit(u *unit.Unit, deadline time.Time) (forced bool) {
 		defer s.mu.Unlock()
 		return st.exited
 	}
+	defer s.recordStopped(u.Name)
 	if !exited() && st.pid > 0 {
+		s.recordStopping(u.Name)
 		sig := u.KillSignal
 		if sig == 0 {
 			sig = syscall.SIGTERM
@@ -1462,6 +1546,7 @@ func (s *Supervisor) probeSpawnIntoCgroup() error {
 func (s *Supervisor) startFailed(u *unit.Unit, err error) error {
 	log.Printf("unit %s: failed to start: %v", u.Name, err)
 	s.event(u.Name, "start_failed", map[string]any{"err": err.Error()})
+	s.update(u.Name, func(st *statefile.Unit) { st.Result = statefile.ResultResources })
 	return &startError{unit: u.Name, err: err}
 }
 
