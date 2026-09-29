@@ -48,8 +48,15 @@ func main() {
 	log.SetFlags(0)
 	log.SetPrefix("container-init: ")
 
+	// Records are written by the tracer's own goroutine, and os.Exit
+	// runs no defers: every exit below flushes it explicitly. Close is
+	// bounded -- by reverse shutdown's deadline once that has begun,
+	// otherwise by trace.CloseWait.
 	tracer := trace.New()
-	defer tracer.Close()
+	exitWith := func(code int) {
+		tracer.Close()
+		os.Exit(code)
+	}
 	tracer.MemSnapshot("boot")
 
 	units, warnings, overrides, err := unit.LoadOverlay([]string{*dir, *dropIn}, unit.Options{Lookup: unit.OSLookup, Strict: *strict})
@@ -66,7 +73,7 @@ func main() {
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "container-init: load units: %v\n", err)
-		os.Exit(64)
+		exitWith(64)
 	}
 	tracer.Event("units_loaded", map[string]any{
 		"count":     len(units),
@@ -82,15 +89,15 @@ func main() {
 		// with 64, so it fails validation the same way, strict or not.
 		if err := supervisor.CheckOrder(units); err != nil {
 			fmt.Fprintf(os.Stderr, "container-init: validate: %v\n", err)
-			os.Exit(64)
+			exitWith(64)
 		}
 		// Strict mode already exits non-zero above on any warning; in
 		// non-strict mode we still want a non-zero exit if any warning
 		// was raised, so build pipelines catch directive drift.
 		if len(warnings) > 0 {
-			os.Exit(1)
+			exitWith(1)
 		}
-		os.Exit(0)
+		exitWith(0)
 	}
 
 	dispatcherStop := make(chan struct{})
@@ -110,7 +117,7 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "container-init: supervisor: %v\n", err)
 		close(dispatcherStop)
-		os.Exit(64)
+		exitWith(64)
 	}
 	sup.SetStopTimeout(*stopTimeout)
 
@@ -147,5 +154,5 @@ func main() {
 	close(dispatcherStop)
 	<-dispatcher.Done()
 	tracer.Event("boot_done", map[string]any{"exit": exit})
-	os.Exit(exit)
+	exitWith(exit)
 }

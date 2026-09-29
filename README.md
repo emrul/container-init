@@ -542,6 +542,15 @@ record has a stable shape: `t_start_ms`, `dt_ms` (per-phase elapsed,
 NOT elapsed-from-boot), `phase`, optional `mem_snapshot`, and any
 event-specific fields.
 
+Tracing never holds up the supervisor. Records go through a bounded
+queue (`trace.Queue`, 4096 records) to a writer goroutine; while the
+destination is not keeping up -- a full pipe, a stalled disk -- records
+that do not fit are dropped, and a `trace_dropped` record with the
+count (`dropped`, and the running `total`) follows once the writer
+catches up. At exit the queue is flushed within reverse shutdown's own
+stop deadline, or for at most 1s on an early exit; a writer still stuck
+then is abandoned, so records queued at the end can be lost.
+
 ```sh
 jq -s 'sort_by(.t_start_ms) | .[] | "\(.t_start_ms)ms \(.phase) \(.dt_ms)ms"' \
   /tmp/container-init-trace.jsonl

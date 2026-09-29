@@ -4,7 +4,6 @@ package supervisor
 
 import (
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -12,14 +11,12 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/emrul/container-init/internal/cgroup"
 	"github.com/emrul/container-init/internal/pid1"
-	"github.com/emrul/container-init/internal/trace"
 	"github.com/emrul/container-init/internal/userdb"
 	"github.com/emrul/container-init/unit"
 )
@@ -227,89 +224,6 @@ func TestAuditCgroupPlacementFailureStillKillsProcess(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if processAlive(pid) {
 		t.Errorf("process %d survived forced shutdown after cgroup placement failed (advertised PGID fallback did not run)", pid)
-	}
-}
-
-// A trace destination can stall independently of the processes being
-// stopped. A full FIFO blocks a spawn's trace write; shutdown must still
-// stop running services within its deadline, so the write must not hold
-// the spawn gate. (Tracing itself stays synchronous: the shutdown's own
-// closing record waits for the destination.)
-func TestAuditShutdownDeadlineIncludesSpawnGate(t *testing.T) {
-	live := &unit.Unit{Name: "live-audit.service", Kind: unit.KindService, Type: unit.TypeSimple,
-		ExecStart: []string{"/bin/sleep", "60"}}
-	pending := &unit.Unit{Name: "pending-audit.service", Kind: unit.KindService, Type: unit.TypeSimple,
-		ExecStart: []string{"/bin/true", strings.Repeat("x", 96*1024)}}
-	s := auditSupervisor(t, live, pending)
-	s.SetStopTimeout(100 * time.Millisecond)
-	liveDone, spawned := make(chan struct{}), make(chan struct{})
-	go func() { s.spawnAndWait(live, nil, func() { close(spawned) }); close(liveDone) }()
-	select {
-	case <-spawned:
-	case <-time.After(3 * time.Second):
-		t.Fatal("live service did not start")
-	}
-	fifo := filepath.Join(t.TempDir(), "trace")
-	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	r, err := os.OpenFile(fifo, os.O_RDONLY|syscall.O_NONBLOCK, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer r.Close()
-	t.Setenv("CONTAINER_INIT_TRACE", "1")
-	t.Setenv("CONTAINER_INIT_TRACE_FILE", fifo)
-	s.tracer = trace.New()
-	defer s.tracer.Close()
-	// Unblock the injected I/O fault before any other cleanup, even on
-	// failure: the tracer's Close waits for the blocked write.
-	drained := make(chan struct{})
-	release := sync.OnceFunc(func() { go func() { io.Copy(io.Discard, r); close(drained) }() })
-	defer release()
-	pendingDone := make(chan struct{})
-	go func() { s.spawnAndWait(pending, nil, nil); close(pendingDone) }()
-	for deadline := time.Now().Add(3 * time.Second); ; time.Sleep(5 * time.Millisecond) {
-		s.mu.Lock()
-		recorded := s.services[pending.Name] != nil
-		s.mu.Unlock()
-		if recorded {
-			break
-		}
-		if time.Now().After(deadline) {
-			release()
-			<-pendingDone
-			t.Fatal("pending spawn was not recorded while its trace write was blocked")
-		}
-	}
-	time.Sleep(50 * time.Millisecond) // into its ~96 KiB trace write
-	select {
-	case <-pendingDone:
-		t.Fatal("pending spawn's trace write did not block; the fault was not injected")
-	default:
-	}
-	s.Stop()
-	stopped := make(chan struct{})
-	go func() { s.shutdown(); close(stopped) }()
-	exceeded := false
-	select {
-	case <-liveDone:
-	case <-time.After(350 * time.Millisecond):
-		exceeded = true
-	}
-	release()
-	select {
-	case <-stopped:
-	case <-time.After(3 * time.Second):
-		t.Fatal("shutdown failed to recover after trace drain")
-	}
-	<-pendingDone
-	<-liveDone
-	s.tracer.Close()
-	r.Close()
-	<-drained
-	if exceeded {
-		t.Error("100ms shutdown deadline was exceeded while a spawn's trace write was blocked")
 	}
 }
 

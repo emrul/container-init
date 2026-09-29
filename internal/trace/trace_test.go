@@ -46,7 +46,8 @@ func newTracerWithFile(t *testing.T) (*Tracer, string) {
 }
 
 func TestTracerEmitsBootStartAnchor(t *testing.T) {
-	_, path := newTracerWithFile(t)
+	tr, path := newTracerWithFile(t)
+	tr.Close()
 	recs := readJSONL(t, path)
 	if len(recs) < 1 {
 		t.Fatalf("no records emitted")

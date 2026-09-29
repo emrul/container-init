@@ -6,6 +6,7 @@
 package trace
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -26,10 +28,36 @@ const (
 	defPath   = "/tmp/container-init-trace.jsonl"
 )
 
-// Tracer is safe for concurrent use; serialises writes through a mutex.
+// Queue and CloseWait bound what tracing can cost the supervisor.
+const (
+	// Queue is how many encoded records may wait for the writer. A
+	// record emitted while it is full is dropped and counted.
+	Queue = 4096
+	// CloseWait bounds Close's flush when no deadline has been set
+	// with SetDeadline.
+	CloseWait = time.Second
+)
+
+// Tracer is safe for concurrent use. Emitting a record never waits
+// for I/O: records are encoded by the caller and queued for a
+// dedicated writer goroutine, so a slow or stalled destination (a
+// full pipe, a hung disk) costs dropped records, not a stuck
+// supervisor. Drops are reported in-stream by trace_dropped records
+// once the writer makes progress.
 type Tracer struct {
-	mu       sync.Mutex
-	w        io.WriteCloser
+	mu      sync.RWMutex // guards closed against sends on q
+	closed  bool
+	q       chan []byte
+	done    chan struct{} // closed when the writer has finished
+	w       io.WriteCloser
+	path    string
+	dropped atomic.Uint64
+	// dmu guards deadline and moved; moved is closed, and replaced,
+	// whenever SetDeadline changes the deadline, waking every Close
+	// in progress to wait for the new one.
+	dmu      sync.Mutex
+	deadline time.Time // zero: none set
+	moved    chan struct{}
 	disabled bool
 	bootMS   int64
 }
@@ -53,7 +81,11 @@ func New() *Tracer {
 		t.disabled = true
 		return t
 	}
-	t.w = f
+	t.w, t.path = f, filepath.Clean(path)
+	t.q = make(chan []byte, Queue)
+	t.moved = make(chan struct{})
+	t.done = make(chan struct{})
+	go t.write()
 	t.emitRaw(map[string]any{
 		"phase":      "boot_start",
 		"t_start_ms": t.bootMS,
@@ -64,17 +96,91 @@ func New() *Tracer {
 	return t
 }
 
-// Close flushes the underlying writer, if any.
+// write is the writer goroutine: it drains the queue until Close,
+// reporting drops as it catches up, then closes the file.
+func (t *Tracer) write() {
+	defer close(t.done)
+	defer t.w.Close()
+	var reported uint64
+	report := func() {
+		if n := t.dropped.Load(); n > reported {
+			rec, _ := encode(map[string]any{
+				"phase":      "trace_dropped",
+				"t_start_ms": nowMS(),
+				"dt_ms":      0,
+				"status":     "error",
+				"dropped":    n - reported,
+				"total":      n,
+			})
+			reported = n
+			_, _ = t.w.Write(rec)
+		}
+	}
+	for rec := range t.q {
+		_, _ = t.w.Write(rec)
+		report()
+	}
+	report()
+}
+
+// SetDeadline bounds every Close's flush at d -- later ones, and any
+// already waiting, which then wait for d instead. Reverse shutdown
+// sets its own deadline here, so the final flush fits within it rather
+// than adding to it.
+func (t *Tracer) SetDeadline(d time.Time) {
+	if t == nil || t.disabled {
+		return
+	}
+	t.dmu.Lock()
+	defer t.dmu.Unlock()
+	t.deadline = d
+	close(t.moved)
+	t.moved = make(chan struct{})
+}
+
+// Close stops accepting records and waits for the writer to flush
+// what is queued -- until the SetDeadline deadline, which may change
+// while it waits, or for CloseWait from the call when none is set. A writer that is still stuck then is abandoned:
+// Close returns anyway. Any number of calls, deferred or not, each
+// wait at most that long.
 func (t *Tracer) Close() {
-	if t == nil {
+	if t == nil || t.disabled {
 		return
 	}
 	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.w != nil {
-		_ = t.w.Close()
-		t.w = nil
+	if !t.closed {
+		t.closed = true
+		close(t.q)
 	}
+	t.mu.Unlock()
+	fallback := time.Now().Add(CloseWait)
+	for {
+		t.dmu.Lock()
+		d, moved := t.deadline, t.moved
+		t.dmu.Unlock()
+		if d.IsZero() {
+			d = fallback
+		}
+		timer := time.NewTimer(time.Until(d))
+		select {
+		case <-t.done:
+			timer.Stop()
+			return
+		case <-timer.C:
+			return
+		case <-moved:
+			timer.Stop()
+		}
+	}
+}
+
+// Dropped reports how many records were dropped because the queue was
+// full.
+func (t *Tracer) Dropped() uint64 {
+	if t == nil {
+		return 0
+	}
+	return t.dropped.Load()
 }
 
 // Phase is a begin/end pair -- the End call emits a record with
@@ -181,17 +287,38 @@ func (t *Tracer) ScheduleMemSnapshot(label string, delay time.Duration) {
 	}()
 }
 
-// emitRaw writes one JSONL record. Caller has already populated every
-// field. Single point of escape-html control + write-mutex.
+// emitRaw queues one JSONL record for the writer. Caller has already
+// populated every field. It never blocks: a full queue drops the
+// record, and a closed tracer discards it.
 func (t *Tracer) emitRaw(rec map[string]any) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.w == nil {
+	if t.disabled {
 		return
 	}
-	enc := json.NewEncoder(t.w)
+	b, err := encode(rec)
+	if err != nil {
+		return
+	}
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	if t.closed {
+		return
+	}
+	select {
+	case t.q <- b:
+	default:
+		t.dropped.Add(1)
+	}
+}
+
+// encode is the single point of escape-html control.
+func encode(rec map[string]any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
-	_ = enc.Encode(rec)
+	if err := enc.Encode(rec); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 func nowMS() int64 { return time.Now().UnixNano() / int64(time.Millisecond) }
@@ -331,10 +458,7 @@ func (t *Tracer) Filename() string {
 	if t == nil || t.disabled {
 		return ""
 	}
-	if f, ok := t.w.(*os.File); ok {
-		return filepath.Clean(f.Name())
-	}
-	return ""
+	return t.path
 }
 
 // Goarch is exported for completeness so callers building cross-arch

@@ -296,8 +296,54 @@ Found while fixing, not in the findings above:
 - The cgroup spawn tests read `spawnIntoCgroupOK` without the `Once`,
   a test-only data race.
 
-Remaining, by design: tracing is still synchronous, so a stalled trace
-destination delays tracing callers, including shutdown's final
-`reverse_shutdown_done` record (processes are still stopped on time).
-There is still a window between `bind(2)` and the `chmod` in which the
-node has the umask's mode.
+### Follow-up review
+
+A review of the fixes above found three more issues:
+
+- **P1: `SocketMode=0000` became 0666.** The unit used 0 for "unset",
+  so an explicit `0000` got the default. The parser now records
+  `SocketModeSet`, carried into `socketact.Perm.ModeSet`: omitted gives
+  0666, anything written is applied exactly.
+- **P2: a blocked trace destination still held up shutdown.** Tracing was
+  synchronous, so `shutdown()`'s final `reverse_shutdown_done` record,
+  and `main`'s exit after it, waited on the destination indefinitely.
+  The tracer now encodes each record in the caller and queues it for a
+  writer goroutine, never blocking: a full queue drops and counts
+  records, reported in-stream as `trace_dropped`. `shutdown()` hands its
+  deadline to the tracer (`SetDeadline`), and `Close` -- which `main`
+  now calls before every `os.Exit` -- waits no longer than that
+  deadline, or `trace.CloseWait` (1s) when none is set. A repeated or
+  deferred `Close` is bounded the same way. No time is added to
+  shutdown for flushing; the cost is that records queued when a forced
+  shutdown hits its deadline may be lost even with a healthy writer.
+- **The bind-then-chmod window.** A Unix socket is now bound in a
+  `MkdirTemp` (0700) directory beside its path, given its owner and
+  mode, and renamed into place -- atomic on the same filesystem, and
+  replacing a stale socket from a previous run. On failure the staged
+  node and directory are removed and the socket fails. A path that
+  fits `sockaddr_un` only without the staging suffix is bound through
+  `/proc/self/fd/<staging dir>`; without `/proc` (macOS, tests only)
+  such a path fails. The umask is never changed, since it is
+  process-wide.
+
+Tests: `TestBindSocketMode` and `TestSocketModeFromUnitFile` (omitted,
+`0000`, `0600`); `TestBindPublishesOnlyAfterPermissions` pauses between
+staging and publishing under umask 000 and asserts the public path does
+not exist and cannot be connected to, then checks owner, mode and
+connectivity (as root with a foreign owner); `TestBindFailureCleansUp`,
+`TestBindReplacesStaleSocket`, `TestBindLongPath`. For tracing,
+`TestShutdownReturnsWithBlockedTrace` stalls the destination until
+records are dropped and asserts that `shutdown()` and the tracer's
+`Close` (twice) return within the deadline -- replacing
+`TestAuditShutdownDeadlineIncludesSpawnGate`, whose fault injection
+relied on a trace write blocking, which can no longer happen -- and
+the trace package tests emitting into a stalled writer, `Close` bounded
+by the deadline and by `CloseWait`, and exact accounting (records
+written plus `Dropped()` equals records emitted; `trace_dropped`'s
+`total` matches).
+
+Still open: two native sockets sharing one long-running service. Each
+activation passes only its own listener, and the run lock makes the
+second wait for the service to exit, so its clients can wait
+indefinitely. systemd passes every socket of the service at start; that
+change is left for a separate review.

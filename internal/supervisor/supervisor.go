@@ -1259,6 +1259,9 @@ func (s *Supervisor) SetStopTimeout(d time.Duration) {
 // shutdown, 1 if any unit had to be killed.
 func (s *Supervisor) shutdown() int {
 	deadline := time.Now().Add(s.stopTimeout)
+	// The trace's final flush shares this deadline instead of adding
+	// to it; tracing itself never blocks shutdown.
+	s.tracer.SetDeadline(deadline)
 	// Nothing starts from here on. Spawns already past the gate finish
 	// recording their process first, so the stop jobs below see them.
 	s.spawnGate.Lock()
