@@ -321,7 +321,9 @@ Drop-ins participate in the supervisor's full lifecycle:
   `OnFailure=`. A Unix socket's node gets `SocketMode=` exactly as
   written, `0000` included (omitted: 0666, as in systemd), and is owned
   by `SocketUser=` / `SocketGroup=` when set; `SocketUser=` alone gives
-  it that user's group. Without
+  it that user's group. The socket is bound in a private directory
+  beside its path and renamed into place only once its owner and mode
+  are set, so it is never reachable with any others. Without
   root, container-init cannot give it another owner, and the socket
   fails. A socket that cannot bind at boot fails at once: its
   `OnFailure=` fires, and its service, which needs it, fails too, so

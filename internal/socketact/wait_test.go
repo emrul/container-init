@@ -16,7 +16,7 @@ import (
 // A listener numbered past select(2)'s 1024-descriptor limit must still
 // be waited on, and WaitReadable must stop once the listener is closed.
 func TestWaitReadableHighDescriptor(t *testing.T) {
-	addr := filepath.Join(t.TempDir(), "sock")
+	addr := filepath.Join(shortTempDir(t), "sock")
 	b, err := Bind(unit.Listener{Network: "unix", Address: addr}, Perm{UID: -1, GID: -1})
 	if err != nil {
 		t.Fatal(err)

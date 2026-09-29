@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -58,30 +59,94 @@ func Bind(l unit.Listener, p Perm) (*Bound, error) {
 		}
 		return &Bound{Listener: l, File: f, listener: ln}, nil
 	case "unix":
-		// Remove a stale socket from a previous run; absent file is
-		// not an error.
-		_ = os.Remove(l.Address)
-		ln, err := net.Listen("unix", l.Address)
-		if err != nil {
-			return nil, fmt.Errorf("listen unix %s: %w", l.Address, err)
-		}
-		f, err := ln.(*net.UnixListener).File()
-		if err != nil {
-			ln.Close()
-			return nil, fmt.Errorf("listen unix %s: file: %w", l.Address, err)
-		}
-		b := &Bound{Listener: l, File: f, listener: ln}
-		// The node is created with the umask applied; set what the
-		// unit asked for. A client can connect in the moment before
-		// the chmod, with the umask's mode (0755 under the usual 022,
-		// which grants connect to nobody but the owner).
-		if err := applyPerm(l.Address, p); err != nil {
-			b.Close()
-			return nil, fmt.Errorf("listen unix %s: %w", l.Address, err)
-		}
-		return b, nil
+		return bindUnix(l, p)
 	}
 	return nil, fmt.Errorf("unsupported network %q", l.Network)
+}
+
+// bindUnix binds l's socket in a private staging directory beside its
+// path, sets the owner and mode p asks for, and only then renames it
+// into place. The public path never exists with any other permissions,
+// so no client can connect before they apply (a bind-then-chmod would
+// leave the umask's mode reachable meanwhile). The staging directory
+// is on the same filesystem, so the rename is atomic; it also replaces
+// a stale socket left by a previous run. On any failure nothing is
+// left at either path.
+func bindUnix(l unit.Listener, p Perm) (*Bound, error) {
+	dst := l.Address
+	fail := func(err error) (*Bound, error) {
+		return nil, fmt.Errorf("listen unix %s: %w", dst, err)
+	}
+	// MkdirTemp creates it 0700, whatever the umask.
+	stage, err := os.MkdirTemp(filepath.Dir(dst), ".ci-")
+	if err != nil {
+		return fail(fmt.Errorf("staging: %w", err))
+	}
+	defer os.RemoveAll(stage)
+	staged := filepath.Join(stage, "s")
+	addr, closeDir, err := bindAddr(stage, staged)
+	if err != nil {
+		return fail(err)
+	}
+	defer closeDir()
+	ln, err := net.Listen("unix", addr)
+	if err != nil {
+		return fail(err)
+	}
+	ul := ln.(*net.UnixListener)
+	// Close must not unlink the staged name: once published, the node
+	// lives at dst, which Bound.Close removes.
+	ul.SetUnlinkOnClose(false)
+	f, err := ul.File()
+	if err != nil {
+		ln.Close()
+		return fail(fmt.Errorf("file: %w", err))
+	}
+	b := &Bound{Listener: l, File: f, listener: ln}
+	if err := applyPerm(staged, p); err != nil {
+		b.closeStaged()
+		return fail(err)
+	}
+	if beforePublish != nil {
+		beforePublish(staged)
+	}
+	if err := os.Rename(staged, dst); err != nil {
+		b.closeStaged()
+		return fail(fmt.Errorf("publish: %w", err))
+	}
+	return b, nil
+}
+
+// beforePublish, when set by a test, runs between a Unix socket's
+// permissions being applied and its rename into place.
+var beforePublish func(staged string)
+
+// closeStaged releases a listener that was never published; its staged
+// node goes with the staging directory.
+func (b *Bound) closeStaged() {
+	b.closed = true
+	_ = b.listener.Close()
+	_ = b.File.Close()
+}
+
+// bindAddr returns the address to bind staged at. A sockaddr_un path
+// is short (108 bytes on Linux), and staging lengthens it; when it no
+// longer fits, bind through the staging directory's descriptor under
+// /proc/self/fd instead, which names the same directory in a few bytes.
+func bindAddr(stage, staged string) (string, func(), error) {
+	if len(staged) < len(unix.RawSockaddrUnix{}.Path) {
+		return staged, func() {}, nil
+	}
+	d, err := os.Open(stage)
+	if err != nil {
+		return "", nil, fmt.Errorf("staging: %w", err)
+	}
+	addr := fmt.Sprintf("/proc/self/fd/%d/s", d.Fd())
+	if _, err := os.Stat(filepath.Dir(addr)); err != nil {
+		d.Close()
+		return "", nil, fmt.Errorf("path too long to stage (%d bytes) and no /proc/self/fd", len(staged))
+	}
+	return addr, func() { d.Close() }, nil
 }
 
 func applyPerm(path string, p Perm) error {
