@@ -40,8 +40,9 @@ policy, passed to `health` as flags; PID 1 never decides health.
   the unit inventory, and cuts against deny-by-default networking. If a
   live query is ever needed, it is a unix socket or `container-init
   status` reading the same file, never TCP.
-- `result: timeout`. `TimeoutStartSec=` and `TimeoutStopSec=` are
-  parsed but not enforced.
+- `result: timeout`. `TimeoutStartSec=` is parsed but not enforced,
+  and a unit killed after its `TimeoutStopSec=` during shutdown is
+  gone with the container.
 - `Type=forking` beyond the parent's exit. The supervisor watches only
   its direct child, so a daemonised process reads as `inactive`.
 - Control of any kind (start, stop, restart).

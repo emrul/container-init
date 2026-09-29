@@ -45,6 +45,8 @@ type Supervisor struct {
 	euid, egid uint32 // container-init's own identity; see credentialPlan
 	stopOnce   sync.Once
 	stopCh     chan struct{}
+	// stopTimeout bounds the whole reverse shutdown; see SetStopTimeout.
+	stopTimeout time.Duration
 	doneCh     chan struct{}
 
 	mu       sync.Mutex
@@ -129,6 +131,7 @@ func New(units []*unit.Unit, tracer *trace.Tracer, dispatcher *pid1.Dispatcher, 
 		euid:       uint32(os.Geteuid()),
 		egid:       uint32(os.Getegid()),
 		stopCh:     make(chan struct{}),
+		stopTimeout: defaultStopTimeout,
 		doneCh:     make(chan struct{}),
 		services:   make(map[string]*serviceState),
 		bounds:     make(map[string]*socketact.Bound),
@@ -352,6 +355,18 @@ func (s *Supervisor) Stop() {
 	s.stopOnce.Do(func() { close(s.stopCh) })
 }
 
+// stopping reports whether reverse shutdown has begun. A unit that
+// exits once it has is being stopped, not failing: as in systemd,
+// neither Restart= nor OnFailure= acts on it.
+func (s *Supervisor) stopping() bool {
+	select {
+	case <-s.stopCh:
+		return true
+	default:
+		return false
+	}
+}
+
 // Done returns a channel closed when Run() has finished its shutdown.
 func (s *Supervisor) Done() <-chan struct{} { return s.doneCh }
 
@@ -392,6 +407,9 @@ func (s *Supervisor) runService(u *unit.Unit) {
 		exitErr := s.spawnAndWait(u, nil, onSpawned)
 		failed := exitErr != nil
 		s.event(u.Name, "exited", map[string]any{"failed": failed, "err": errString(exitErr)})
+		if s.stopping() {
+			return // stopped by reverse shutdown: not a failure
+		}
 
 		// Type=oneshot: signal ready only on first successful exec.
 		// Failed oneshots stay un-ready until they succeed (or the
@@ -639,6 +657,8 @@ func (s *Supervisor) spawnAndWait(u *unit.Unit, extra *socketact.Bound, onSpawne
 	select {
 	case msg = <-status:
 	case <-s.stopCh:
+		// Still the wrapper, not the service: nothing to stop in
+		// order, so end it now.
 		_ = syscall.Kill(pid, syscall.SIGTERM)
 		msg = <-status
 	}
@@ -651,16 +671,9 @@ func (s *Supervisor) spawnAndWait(u *unit.Unit, extra *socketact.Bound, onSpawne
 		onSpawned()
 	}
 
-	var es pid1.ExitStatus
-	select {
-	case <-s.stopCh:
-		// Reverse shutdown -- kick the child via SIGTERM and still
-		// block on the dispatcher so state.exited is honest.
-		_ = syscall.Kill(pid, syscall.SIGTERM)
-		es = <-exitCh
-	case es = <-exitCh:
-	}
-	return s.finish(u, state, es)
+	// Reverse shutdown signals the service in its turn (see shutdown);
+	// until then it keeps running, so wait for its exit either way.
+	return s.finish(u, state, <-exitCh)
 }
 
 // finish records that u's process has exited with es, sweeps anything
@@ -912,6 +925,9 @@ func (s *Supervisor) runActivated(svc *unit.Unit, extra *socketact.Bound) activa
 		exitErr := s.spawnAndWait(svc, extra, nil)
 		failed := exitErr != nil
 		s.event(svc.Name, "exited", map[string]any{"failed": failed, "err": errString(exitErr)})
+		if s.stopping() {
+			return endStopped
+		}
 		if failed && svc.ExitContainerOnFailure {
 			s.unitFailed(svc, exitErr)
 			s.Stop()
@@ -1045,88 +1061,150 @@ func shouldRestart(u *unit.Unit, failed bool) bool {
 	return false
 }
 
-// shutdown signals every supervised process and waits for them to
-// exit, with a per-service kill timeout. Returns the container exit
-// code (0 on graceful shutdown, 1 if any service was force-killed).
-func (s *Supervisor) shutdown() int {
-	const grace = 5 * time.Second
-	s.mu.Lock()
-	procs := make([]*serviceState, 0, len(s.services))
-	for _, st := range s.services {
-		procs = append(procs, st)
+// Default stop timeouts. A unit gets defaultTimeoutStopSec unless it
+// sets TimeoutStopSec=; the whole shutdown gets defaultStopTimeout
+// unless SetStopTimeout says otherwise. The overall default stays
+// under docker stop's 10s, after which the container is SIGKILLed with
+// whatever is still running.
+const (
+	defaultTimeoutStopSec = 5 * time.Second
+	defaultStopTimeout    = 8 * time.Second
+)
+
+// SetStopTimeout bounds the whole reverse shutdown: once d has passed,
+// every unit still running is killed at once. d <= 0 restores the
+// default. Call before Run.
+func (s *Supervisor) SetStopTimeout(d time.Duration) {
+	if d <= 0 {
+		d = defaultStopTimeout
 	}
+	s.stopTimeout = d
+}
+
+// shutdown stops every unit in reverse dependency order, as systemd
+// does: a unit is stopped once every unit ordered After= it has
+// stopped, and units with no ordering between them stop in parallel.
+// Each gets its KillSignal= (default SIGTERM) and TimeoutStopSec=
+// (default 5s) before it is killed, and the whole shutdown is bounded
+// by the stop timeout. Returns the container exit code: 0 on graceful
+// shutdown, 1 if any unit had to be killed.
+func (s *Supervisor) shutdown() int {
+	deadline := time.Now().Add(s.stopTimeout)
+	// dependents[x] lists the units ordered After= x (Before= was
+	// folded into After= in New). topoSort rejected cycles, so every
+	// wait below ends.
+	dependents := make(map[string][]string, len(s.units))
+	for _, u := range s.units {
+		for _, a := range u.After {
+			if _, ok := s.byName[a]; ok {
+				dependents[a] = append(dependents[a], u.Name)
+			}
+		}
+	}
+	stopped := make(map[string]chan struct{}, len(s.units))
+	for _, u := range s.units {
+		stopped[u.Name] = make(chan struct{})
+	}
+	// expired closes at the deadline: from then on nothing waits for
+	// order, and every unit still running is stopped (and killed) now.
+	expired := make(chan struct{})
+	expiry := time.AfterFunc(time.Until(deadline), func() { close(expired) })
+	defer expiry.Stop()
+	var forced atomic.Bool
+	var wg sync.WaitGroup
+	for _, u := range s.units {
+		wg.Add(1)
+		go func(u *unit.Unit) {
+			defer wg.Done()
+			defer close(stopped[u.Name])
+			for _, d := range dependents[u.Name] {
+				select {
+				case <-stopped[d]:
+				case <-expired:
+				}
+			}
+			if s.stopUnit(u, deadline) {
+				forced.Store(true)
+			}
+		}(u)
+	}
+	wg.Wait()
+
+	s.mu.Lock()
 	bounds := make([]*socketact.Bound, 0, len(s.bounds))
 	for _, b := range s.bounds {
 		bounds = append(bounds, b)
 	}
 	s.mu.Unlock()
-
-	for i := len(procs) - 1; i >= 0; i-- {
-		p := procs[i]
-		// exited is written by spawnAndWait under s.mu when the
-		// dispatcher reports the exit, which can race this pass.
-		s.mu.Lock()
-		done := p.exited
-		s.mu.Unlock()
-		if done || p.pid <= 0 {
-			continue
-		}
-		// Polite first pass: SIGTERM the immediate child so anything
-		// with a graceful-shutdown handler gets a chance to run.
-		// Force-kill via cgroup.kill (or PGID fallback) lands after
-		// the grace window if needed.
-		_ = syscall.Kill(p.pid, syscall.SIGTERM)
-	}
-	deadline := time.Now().Add(grace)
-	exit := 0
-	for _, p := range procs {
-		dl := time.Until(deadline)
-		if dl < 0 {
-			dl = 0
-		}
-		end := time.Now().Add(dl)
-		for time.Now().Before(end) {
-			s.mu.Lock()
-			done := p.exited
-			s.mu.Unlock()
-			if done {
-				break
-			}
-			time.Sleep(50 * time.Millisecond)
-		}
-		s.mu.Lock()
-		done := p.exited
-		s.mu.Unlock()
-		if !done {
-			// Force-kill: cgroup.kill is atomic and reaches every
-			// descendant regardless of PID reuse. Without cgroup-v2,
-			// fall back to PID + PGID SIGKILL (still racy per the original
-			// surprise #3, but the best we have on cgroup-v1 hosts).
-			if s.cgroup.Available() {
-				_ = s.cgroup.Kill(p.name)
-			} else if p.pid > 0 {
-				_ = syscall.Kill(p.pid, syscall.SIGKILL)
-				_ = killGroup(p.pid, syscall.SIGKILL)
-			}
-			log.Printf("shutdown: %s force-killed (grace expired)", p.name)
-			exit = 1
-		} else if s.cgroup.Available() {
-			// Even on graceful exit, sweep the cgroup so leftover
-			// orphans (dbus-daemon etc.) don't outlive the
-			// container's reverse-shutdown.
-			_ = s.cgroup.Kill(p.name)
-		}
-		if s.cgroup.Available() {
-			_ = s.cgroup.Remove(p.name)
-		}
-	}
 	for _, b := range bounds {
 		b.Close()
+	}
+	exit := 0
+	if forced.Load() {
+		exit = 1
 	}
 	if s.tracer != nil {
 		s.tracer.Event("reverse_shutdown_done", map[string]any{"exit": exit})
 	}
 	return exit
+}
+
+// stopUnit stops u's running process, if it has one: its KillSignal=,
+// then up to its TimeoutStopSec= (cut short by deadline) for it to
+// exit, then a kill of its whole cgroup (or process group). Reports
+// whether it had to be killed.
+func (s *Supervisor) stopUnit(u *unit.Unit, deadline time.Time) (forced bool) {
+	s.mu.Lock()
+	st := s.services[u.Name]
+	s.mu.Unlock()
+	if st == nil {
+		return false // never spawned
+	}
+	exited := func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return st.exited
+	}
+	if !exited() && st.pid > 0 {
+		sig := u.KillSignal
+		if sig == 0 {
+			sig = syscall.SIGTERM
+		}
+		_ = syscall.Kill(st.pid, sig)
+		wait := u.TimeoutStopSec
+		if wait <= 0 {
+			wait = defaultTimeoutStopSec
+		}
+		end := time.Now().Add(wait)
+		if deadline.Before(end) {
+			end = deadline
+		}
+		for !exited() && time.Now().Before(end) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		if !exited() {
+			// Force-kill: cgroup.kill is atomic and reaches every
+			// descendant regardless of PID reuse. Without cgroup-v2,
+			// fall back to PID + PGID SIGKILL (racy on PID reuse, but
+			// the best there is without cgroup v2).
+			if s.cgroup.Available() {
+				_ = s.cgroup.Kill(u.Name)
+			} else {
+				_ = syscall.Kill(st.pid, syscall.SIGKILL)
+				_ = killGroup(st.pid, syscall.SIGKILL)
+			}
+			log.Printf("shutdown: %s force-killed (stop timeout expired)", u.Name)
+			forced = true
+		}
+	}
+	if s.cgroup.Available() {
+		// Even on graceful exit, sweep the cgroup so leftover orphans
+		// (dbus-daemon etc.) don't outlive the container's reverse
+		// shutdown.
+		_ = s.cgroup.Kill(u.Name)
+		_ = s.cgroup.Remove(u.Name)
+	}
+	return forced
 }
 
 // credentialPlan decides how a User= unit is started. As root,

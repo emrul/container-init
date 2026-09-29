@@ -12,6 +12,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/emrul/container-init/internal/cgroup"
 	"github.com/emrul/container-init/internal/execwrap"
@@ -35,6 +36,7 @@ func main() {
 	strict := flag.Bool("strict-units", false, "fail fast on any parser warning (unknown directive / section)")
 	validate := flag.Bool("validate", false, "load + parse units, print summary, exit without supervising (build-time sanity)")
 	systemd1Shim := flag.String("systemd1-shim", "", "comma-separated D-Bus addresses to register org.freedesktop.systemd1 on (e.g. \"user:1000\" or \"user:env:KASM_OS_UID\"); empty disables")
+	stopTimeout := flag.Duration("stop-timeout", 8*time.Second, "bound on the whole reverse shutdown; units still running after it are killed (keep it under docker stop's timeout, 10s by default)")
 	versionFlag := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
@@ -104,6 +106,7 @@ func main() {
 		close(dispatcherStop)
 		os.Exit(64)
 	}
+	sup.SetStopTimeout(*stopTimeout)
 
 	// Compatibility shim for clients that probe systemd by spawning
 	// systemd-run (notably Ptyxis). Off by default; opt-in via flag.

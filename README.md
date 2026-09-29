@@ -38,8 +38,8 @@ The [PID 1 problems](https://github.com/gdraheim/docker-systemctl-replacement#pr
 | Problem | How container-init addresses it |
 |---|---|
 | **Zombie accumulation** | `internal/pid1` owns a dedicated SIGCHLD-driven `wait4(-1)` loop. Every reparented grandchild -- from `dbus-launch`, `Type=forking` units, or any process that re-parents onto PID 1 -- is reaped silently and immediately. |
-| **SIGTERM not reaching children** | `docker stop` sends SIGTERM to PID 1; the dispatcher forwards it to every supervised child before the stop timeout expires. |
-| **Unordered / incomplete shutdown** | Reverse-dependency shutdown tears services down in reverse `After=` / `Before=` order, giving each its `TimeoutStopSec` before SIGKILL. |
+| **SIGTERM not reaching children** | `docker stop` sends SIGTERM to PID 1, which stops every supervised unit before `--stop-timeout` expires. |
+| **Unordered / incomplete shutdown** | Reverse-dependency shutdown stops units in reverse `After=` / `Before=` order, each with its `KillSignal=` and `TimeoutStopSec=` before it is killed, all within `--stop-timeout`. |
 | **Service startup at boot** | The supervisor reads unit files and starts all services at launch, respecting `After=` / `Before=` ordering and `Requires=` -- no bespoke shell scripts needed. |
 
 ## Layout
@@ -97,6 +97,12 @@ a fatal load error -- useful in CI to catch typos before they ship.
 The `--validate` flag loads + parses units, prints a summary, and
 exits without supervising. Combined with `--strict-units`, this is a
 build-time sanity check.
+
+The `--stop-timeout` flag (default `8s`) bounds the whole reverse
+shutdown: once it has passed, every unit still running is killed at
+once. Keep it under the time `docker stop` allows (`--time`, 10s by
+default), after which Docker SIGKILLs the container with whatever is
+still running.
 
 ## systemd1 D-Bus compatibility shim
 
@@ -304,6 +310,18 @@ Drop-ins participate in the supervisor's full lifecycle:
   exits without taking its connection cannot be restarted as fast as it
   exits; `0` in either disables it. A failed socket fires its own
   `OnFailure=`.
+- **Reverse shutdown** -- on SIGTERM / SIGINT, or when
+  `ExitContainerOnFailure=` fires, units stop in reverse dependency
+  order, as in systemd: a unit is stopped once every unit ordered
+  `After=` it (or that it orders `Before=`) has stopped, and units with
+  no ordering between them stop in parallel. Each is sent its
+  `KillSignal=` (default SIGTERM) and given its `TimeoutStopSec=`
+  (default 5s, and `0` means the default, not systemd's "no timeout")
+  to exit before its cgroup (or process group) is killed; the whole
+  shutdown is bounded by `--stop-timeout`. A unit that exits during
+  shutdown is being stopped, not failing: neither `Restart=` nor
+  `OnFailure=` acts on it. `ExecStop=` / `ExecStopPost=` are parsed
+  but not run.
 - **ExitContainerOnFailure=true** -- fail-secure: take the whole
   container down via reverse shutdown on this unit's first failure,
   even one `Restart=` would have recovered from; `OnFailure=` fires on
