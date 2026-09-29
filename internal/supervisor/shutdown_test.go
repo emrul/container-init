@@ -182,3 +182,99 @@ func TestShutdownDoesNotFireOnFailure(t *testing.T) {
 		}
 	}
 }
+
+// TestSocketClosesAfterItsDependentsStop: a socket's listener stays
+// open while a unit ordered After= it is still stopping, in both modes;
+// it closes in the socket's own turn.
+func TestSocketClosesAfterItsDependentsStop(t *testing.T) {
+	for _, mode := range activationModes {
+		t.Run(mode.String(), func(t *testing.T) {
+			dir := t.TempDir()
+			up := filepath.Join(dir, "up")
+			stopping := filepath.Join(dir, "stopping")
+			release := filepath.Join(dir, "release")
+			sock, svc := socketPair(t, mode, dir, "sock")
+			svc.ExecStart = []string{"/bin/sleep", "60"}
+			consumer := shellUnit("consumer.service", fmt.Sprintf(
+				`trap 'touch %s; while [ ! -f %s ]; do sleep 0.02; done; exit 0' TERM; touch %s; sleep 60 & wait`,
+				stopping, release, up), sock.Name)
+			path := sock.ListenStream[0].Address
+
+			d := pid1.NewDispatcher()
+			dispStop := make(chan struct{})
+			defer close(dispStop)
+			d.Start(dispStop)
+			sup, err := New([]*unit.Unit{sock, svc, consumer}, nil, d, &cgroup.Manager{})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			go sup.Run()
+			waitListening(t, sup, sock.Name)
+			waitFile(t, up)
+
+			sup.Stop()
+			waitFile(t, stopping)
+			time.Sleep(100 * time.Millisecond)
+			_, statErr := os.Stat(path)
+			_ = os.WriteFile(release, nil, 0o600)
+			if statErr != nil {
+				t.Errorf("socket closed while consumer.service was still stopping: %v", statErr)
+			}
+			select {
+			case <-sup.Done():
+			case <-time.After(10 * time.Second):
+				t.Fatal("supervisor did not shut down")
+			}
+			if _, err := os.Stat(path); err == nil {
+				t.Error("socket still bound after shutdown")
+			}
+		})
+	}
+}
+
+// TestOnFailureQueuedAcrossStop: a failure handler queued just before
+// shutdown began is not invoked, even once shutdown has finished.
+func TestOnFailureQueuedAcrossStop(t *testing.T) {
+	dir := t.TempDir()
+	mark := filepath.Join(dir, "fired")
+	u := shellUnit("failing.service", "exit 1")
+	u.OnFailure = []string{"handler.service"}
+	handler := &unit.Unit{
+		Name:      "handler.service",
+		Kind:      unit.KindService,
+		Type:      unit.TypeOneshot,
+		ExecStart: []string{"/bin/touch", mark},
+	}
+	// Hold unitFailed at its log line, just before it queues the
+	// handler, and shut down meanwhile.
+	gate := newLogGate(t, "unit failing.service: failed:")
+	sup := runUnits(t, u, handler)
+	gate.wait(t)
+	sup.Stop()
+	select {
+	case <-sup.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("supervisor did not shut down")
+	}
+	gate.open()
+	time.Sleep(200 * time.Millisecond)
+	if strings.Contains(gate.String(), "OnFailure: invoking handler.service") {
+		t.Error("OnFailure= target invoked after shutdown")
+	}
+	if _, err := os.Stat(mark); err == nil {
+		t.Error("OnFailure= target ran after shutdown")
+	}
+}
+
+// waitFile waits until f exists.
+func waitFile(t *testing.T, f string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(f); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("%s never appeared", f)
+}

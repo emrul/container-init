@@ -320,8 +320,13 @@ Drop-ins participate in the supervisor's full lifecycle:
   to exit before its cgroup (or process group) is killed; the whole
   shutdown is bounded by `--stop-timeout`. A unit that exits during
   shutdown is being stopped, not failing: neither `Restart=` nor
-  `OnFailure=` acts on it. `ExecStop=` / `ExecStopPost=` are parsed
-  but not run.
+  `OnFailure=` acts on it, and no unit is started once shutdown has
+  begun, including an `OnFailure=` target queued just before. A
+  `.socket` closes its listener in its own turn, after its service
+  (as systemd's implicit ordering has it) and every unit ordered
+  `After=` it; until then a proxy socket still reaches a running
+  helper but starts no new one. `ExecStop=` / `ExecStopPost=` are
+  parsed but not run.
 - **ExitContainerOnFailure=true** -- fail-secure: take the whole
   container down via reverse shutdown on this unit's first failure,
   even one `Restart=` would have recovered from; `OnFailure=` fires on

@@ -47,6 +47,13 @@ type Supervisor struct {
 	stopCh     chan struct{}
 	// stopTimeout bounds the whole reverse shutdown; see SetStopTimeout.
 	stopTimeout time.Duration
+	// spawnGate orders unit spawns against shutdown. A spawn holds it
+	// shared from its noSpawn check until its process is recorded in
+	// services; shutdown takes it exclusively to set noSpawn, so every
+	// process that started is one its stop jobs can see, and none
+	// starts after.
+	spawnGate sync.RWMutex
+	noSpawn   bool
 	doneCh     chan struct{}
 
 	mu       sync.Mutex
@@ -471,6 +478,12 @@ func (s *Supervisor) fireOnFailure(name string) {
 	if u.Condition.Skip {
 		return
 	}
+	if s.stopping() {
+		// Queued by a failure just before shutdown began: shutdown
+		// stops units, it does not run their failure handlers.
+		log.Printf("OnFailure: %s not invoked: shutting down", name)
+		return
+	}
 	if !s.allowStart(u) {
 		// A refused invocation does not chain to the target's own
 		// OnFailure=, just as a failed one below does not: with a
@@ -490,6 +503,9 @@ func (s *Supervisor) fireOnFailure(name string) {
 	log.Printf("OnFailure: invoking %s", name)
 	s.event(name, "onfailure_invoke", nil)
 	exitErr := s.spawnAndWait(u, nil, nil)
+	if errors.Is(exitErr, errStopping) {
+		return
+	}
 	failed := exitErr != nil
 	s.event(name, "onfailure_exited", map[string]any{"failed": failed, "err": errString(exitErr)})
 	if u.ExitContainerOnFailure {
@@ -609,6 +625,11 @@ func (s *Supervisor) spawnAndWait(u *unit.Unit, extra *socketact.Bound, onSpawne
 		}
 	}
 
+	s.spawnGate.RLock()
+	if s.noSpawn {
+		s.spawnGate.RUnlock()
+		return errStopping
+	}
 	s.event(u.Name, "spawn", map[string]any{"argv": u.ExecStart})
 	invokePhase := s.tracer.Begin(trace.PhaseFromUnitName(u.Name))
 	pid, exitCh, err := s.dispatcher.Spawn(cmd)
@@ -616,6 +637,7 @@ func (s *Supervisor) spawnAndWait(u *unit.Unit, extra *socketact.Bound, onSpawne
 	// the read below sees EOF when the service execs.
 	statusW.Close()
 	if err != nil {
+		s.spawnGate.RUnlock()
 		invokePhase.EndStatus("error", map[string]any{"unit": u.Name, "err": err.Error()})
 		return s.startFailed(u, err)
 	}
@@ -648,6 +670,7 @@ func (s *Supervisor) spawnAndWait(u *unit.Unit, extra *socketact.Bound, onSpawne
 	s.mu.Lock()
 	s.services[u.Name] = state
 	s.mu.Unlock()
+	s.spawnGate.RUnlock()
 
 	// Wait for the wrapper to exec the service (EOF on the status pipe)
 	// or to report why it could not. This can take as long as a hung
@@ -815,39 +838,50 @@ func (s *Supervisor) driveProxy(sock *unit.Unit, bound *socketact.Bound) {
 		return
 	}
 	var (
-		mu     sync.Mutex
-		up     chan struct{} // closed once the running helper may be dialled; nil while none runs
-		first  = true
-		failed atomic.Bool // the socket failed and closed its listener
+		mu    sync.Mutex
+		up    chan struct{} // closed once the running helper may be dialled; nil while none runs
+		first = true
+		// failed is set, under mu, the moment the socket is decided
+		// failed -- before its listener closes -- so no connection can
+		// start a helper after that.
+		failed atomic.Bool
 	)
-	fail := func(reason string) {
-		failed.Store(true)
-		s.socketFailed(sock, bound, reason)
-	}
 	// helper returns the running helper's channel, starting a helper if
-	// none runs; false means the socket has failed.
+	// none runs; false means the socket has failed or shutdown began.
 	helper := func() (chan struct{}, bool) {
 		mu.Lock()
-		defer mu.Unlock()
+		if failed.Load() || s.stopping() {
+			mu.Unlock()
+			return nil, false
+		}
 		if up != nil {
+			defer mu.Unlock()
 			return up, true
 		}
 		if reason := s.trigger(sock, first); reason != "" {
-			fail(reason)
+			failed.Store(true)
+			mu.Unlock()
+			s.socketFailed(sock, bound, reason)
 			return nil, false
 		}
 		ch := make(chan struct{})
 		up = ch
 		checkDeps := first
 		first = false
+		mu.Unlock()
 		go func() {
 			end := s.runHelperLoop(svc, ch, checkDeps)
+			rearm, reason := afterActivation(svc, end)
+			// Idle or failed in one step: a connection sees either the
+			// helper gone and the socket usable, or the socket failed.
 			mu.Lock()
 			up = nil
-			mu.Unlock()
-			rearm, reason := afterActivation(svc, end)
 			if reason != "" {
-				fail(reason)
+				failed.Store(true)
+			}
+			mu.Unlock()
+			if reason != "" {
+				s.socketFailed(sock, bound, reason)
 			}
 			if rearm {
 				s.listeningAgain(sock, svc)
@@ -856,19 +890,14 @@ func (s *Supervisor) driveProxy(sock *unit.Unit, bound *socketact.Bound) {
 		return ch, true
 	}
 
-	go func() {
-		<-s.stopCh
-		bound.Close()
-	}()
+	// The listener stays open through shutdown until the socket's own
+	// stop job closes it, after its service and every unit ordered
+	// after it have stopped; until then connections still reach a
+	// running helper.
 	for {
 		conn, err := bound.Accept()
 		if err != nil {
-			select {
-			case <-s.stopCh:
-				return
-			default:
-			}
-			if !failed.Load() {
+			if !failed.Load() && !s.stopping() {
 				log.Printf("socket %s accept: %v", sock.Name, err)
 			}
 			return
@@ -876,7 +905,10 @@ func (s *Supervisor) driveProxy(sock *unit.Unit, bound *socketact.Bound) {
 		ch, ok := helper()
 		if !ok {
 			conn.Close()
-			return
+			if failed.Load() {
+				return
+			}
+			continue // shutting down: no new helper
 		}
 		<-ch
 		network, target := splitProxyTarget(sock.ProxyTarget)
@@ -1090,6 +1122,11 @@ func (s *Supervisor) SetStopTimeout(d time.Duration) {
 // shutdown, 1 if any unit had to be killed.
 func (s *Supervisor) shutdown() int {
 	deadline := time.Now().Add(s.stopTimeout)
+	// Nothing starts from here on. Spawns already past the gate finish
+	// recording their process first, so the stop jobs below see them.
+	s.spawnGate.Lock()
+	s.noSpawn = true
+	s.spawnGate.Unlock()
 	// dependents[x] lists the units ordered After= x (Before= was
 	// folded into After= in New). topoSort rejected cycles, so every
 	// wait below ends.
@@ -1098,6 +1135,14 @@ func (s *Supervisor) shutdown() int {
 		for _, a := range u.After {
 			if _, ok := s.byName[a]; ok {
 				dependents[a] = append(dependents[a], u.Name)
+			}
+		}
+		// A socket stops after the service it activates, as systemd's
+		// implicit Before= between them has it, whether or not the
+		// service orders itself After= the socket.
+		if u.Kind == unit.KindSocket {
+			if _, ok := s.byName[u.Service]; ok && !slices.Contains(dependents[u.Name], u.Service) {
+				dependents[u.Name] = append(dependents[u.Name], u.Service)
 			}
 		}
 	}
@@ -1123,6 +1168,10 @@ func (s *Supervisor) shutdown() int {
 				case <-expired:
 				}
 			}
+			if u.Kind == unit.KindSocket {
+				s.closeSocket(u.Name)
+				return
+			}
 			if s.stopUnit(u, deadline) {
 				forced.Store(true)
 			}
@@ -1130,15 +1179,6 @@ func (s *Supervisor) shutdown() int {
 	}
 	wg.Wait()
 
-	s.mu.Lock()
-	bounds := make([]*socketact.Bound, 0, len(s.bounds))
-	for _, b := range s.bounds {
-		bounds = append(bounds, b)
-	}
-	s.mu.Unlock()
-	for _, b := range bounds {
-		b.Close()
-	}
 	exit := 0
 	if forced.Load() {
 		exit = 1
@@ -1147,6 +1187,18 @@ func (s *Supervisor) shutdown() int {
 		s.tracer.Event("reverse_shutdown_done", map[string]any{"exit": exit})
 	}
 	return exit
+}
+
+// closeSocket closes the listener of the socket named name, if it is
+// still bound: its stop job in reverse shutdown.
+func (s *Supervisor) closeSocket(name string) {
+	s.mu.Lock()
+	b := s.bounds[name]
+	delete(s.bounds, name)
+	s.mu.Unlock()
+	if b != nil {
+		b.Close()
+	}
 }
 
 // stopUnit stops u's running process, if it has one: its KillSignal=,
@@ -1283,6 +1335,10 @@ func (s *Supervisor) startFailed(u *unit.Unit, err error) error {
 	s.event(u.Name, "start_failed", map[string]any{"err": err.Error()})
 	return &startError{unit: u.Name, err: err}
 }
+
+// errStopping is what spawnAndWait returns once shutdown has begun: the
+// unit was not started. Callers check stopping() and give up quietly.
+var errStopping = errors.New("not started: shutting down")
 
 // startError is a failure to start a unit, as opposed to a unit that
 // ran and exited non-zero.

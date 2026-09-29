@@ -5,9 +5,12 @@ package supervisor
 import (
 	"bufio"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -274,5 +277,98 @@ func TestSocketFailsWhenRequirementFails(t *testing.T) {
 				t.Errorf("service ran %d time(s), want 0", n)
 			}
 		})
+	}
+}
+
+// logGate is a log writer that blocks the first line containing match
+// until release is closed, holding the logging goroutine at that point.
+type logGate struct {
+	match   string
+	entered chan struct{} // closed when the matching line arrives
+	release chan struct{}
+	once    sync.Once
+	opened  sync.Once
+	mu      sync.Mutex
+	lines   strings.Builder
+}
+
+func newLogGate(t *testing.T, match string) *logGate {
+	g := &logGate{match: match, entered: make(chan struct{}), release: make(chan struct{})}
+	log.SetOutput(g)
+	t.Cleanup(func() {
+		g.open()
+		log.SetOutput(os.Stderr)
+	})
+	return g
+}
+
+// open lets the held line, and every later one, through.
+func (g *logGate) open() { g.opened.Do(func() { close(g.release) }) }
+
+func (g *logGate) Write(p []byte) (int, error) {
+	g.mu.Lock()
+	g.lines.Write(p)
+	g.mu.Unlock()
+	if strings.Contains(string(p), g.match) {
+		g.once.Do(func() {
+			close(g.entered)
+			<-g.release
+		})
+	}
+	return len(p), nil
+}
+
+func (g *logGate) String() string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.lines.String()
+}
+
+func (g *logGate) wait(t *testing.T) {
+	t.Helper()
+	select {
+	case <-g.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("never logged %q", g.match)
+	}
+}
+
+// TestProxyFailedSocketNotReactivated: once a proxy socket is decided
+// failed (here: its service's requirement failed), a connection that
+// arrives before the listener closes must not start the service.
+func TestProxyFailedSocketNotReactivated(t *testing.T) {
+	dir := t.TempDir()
+	mark := filepath.Join(dir, "spawned")
+	sock, svc := socketPair(t, unit.ActivationProxy, dir, "needy")
+	svc.ExecStart = []string{"/bin/sh", "-c", "touch " + mark + "; sleep 5"}
+	svc.Requires = []string{"broken.service"}
+	svc.After = []string{"broken.service"}
+	broken := &unit.Unit{
+		Name:      "broken.service",
+		Kind:      unit.KindService,
+		Type:      unit.TypeOneshot,
+		ExecStart: []string{"/bin/false"},
+	}
+	// Hold socketFailed at its log line, before the listener closes.
+	gate := newLogGate(t, "socket needy.socket: failed:")
+	sup := runUnits(t, sock, svc, broken)
+	path := sock.ListenStream[0].Address
+	waitListening(t, sup, sock.Name)
+	waitSettled(t, sup, broken.Name)
+
+	c, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	gate.wait(t)
+	c2, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c2.Close()
+	time.Sleep(300 * time.Millisecond)
+	if _, err := os.Stat(mark); err == nil {
+		t.Error("service started after its socket was decided failed")
 	}
 }
