@@ -54,6 +54,8 @@ internal/
   cgroup/              per-unit cgroup-v2 placement + cgroup.kill teardown
   pid1/                SIGCHLD dispatcher, signal forwarding, reverse shutdown
   trace/               JSONL boot-trace emission
+  statefile/           the --state-file format, written atomically
+  health/              `container-init health`, judging the state file
   userdb/              /etc/passwd + /etc/group resolution for User= / Group=
 Makefile
 ```
@@ -108,6 +110,10 @@ shutdown: once it has passed, every unit still running is killed at
 once. Keep it under the time `docker stop` allows (`--time`, 10s by
 default), after which Docker SIGKILLs the container with whatever is
 still running.
+
+The `--state-file` flag makes container-init report every unit's
+state in a JSON file, for `container-init health`; see
+[Health checks](#health-checks).
 
 ## systemd1 D-Bus compatibility shim
 
@@ -565,6 +571,51 @@ jq -s 'sort_by(.t_start_ms) | .[] | "\(.t_start_ms)ms \(.phase) \(.dt_ms)ms"' \
 
 Set `CONTAINER_INIT_TRACE_LABELS="<unit>:<label>,<unit>:<label>"` to
 capture a labelled `mem_snapshot` after specific units come up.
+
+## Health checks
+
+A Docker `HEALTHCHECK` can probe what a container serves, but not what
+only PID 1 knows: whether a setup oneshot finished, or whether a
+service has stopped for good. With `--state-file <path>`,
+container-init writes every unit's state to a JSON file -- at startup,
+on every change, and on a 10s heartbeat -- and `container-init health`
+reads it and exits 0 (healthy) or 1 (unhealthy), never Docker's
+reserved 2. PID 1 opens no listener for this.
+
+```dockerfile
+ENTRYPOINT ["/usr/bin/container-init", "--state-file", "/run/container-init/state.json"]
+HEALTHCHECK --interval=30s --start-period=60s --retries=3 \
+  CMD ["/usr/bin/container-init", "health", "--state-file", "/run/container-init/state.json", \
+       "--require", "app-setup.service,app.service,app.socket"]
+```
+
+`health` is unhealthy when the heartbeat is older than `--max-age`
+(default 30s, three missed heartbeats), when container-init is
+shutting down, and, with `--require`, when a named unit is missing or
+fails the rule for its kind:
+
+- a service must be `active`;
+- a oneshot must have finished successfully (`RemainAfterExit=` is not
+  needed), so it is unhealthy while it runs, and one under
+  `Restart=always` never passes;
+- a socket must be listening, and its service must pass;
+- a socket-activated service must be running or waiting for a
+  connection, with every one of its sockets listening;
+- an `OnFailure=` target must be untriggered or finished.
+
+A unit that will never start this boot (a failed condition, or a
+failed or missing requirement) fails. Without `--require`, any failed
+unit makes the container unhealthy. The heartbeat advances only while
+the supervisor passes its own checks -- its state lock can be taken,
+the child reaper answers, and no unit's exit has gone unhandled -- so a
+hung container-init goes stale and unhealthy.
+
+The file is written atomically (a temporary file renamed over it),
+0644. A missing directory is created 0755; put the file in a directory
+only container-init's user can write -- as root, container-init warns
+if another uid could replace it. Writing never holds up supervision or
+shutdown. The format and every field are in
+[docs/design/state-file.md](docs/design/state-file.md).
 
 ## License
 

@@ -64,6 +64,6 @@ jobs:
           # These must run, not skip.
           for t in TestSpawnStartsInsideUnitCgroup TestSeccompDeniedCloneIntoCgroupFallsBack TestWrapperRunsAsUnitUser \
                    TestAuditCgroupPlacementFailureStillKillsProcess TestSocketUserAloneTakesItsGroup \
-                   TestBindPublishesOnlyAfterPermissions; do
+                   TestBindPublishesOnlyAfterPermissions TestStateFileWritableDirectoryWarning; do
             grep -q -- "--- PASS: $t " test.log || { echo "::error::$t did not pass"; exit 1; }
           done

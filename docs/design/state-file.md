@@ -1,6 +1,6 @@
 # Design: unit-state file and `container-init health`
 
-Status: accepted
+Status: implemented
 Date: 2026-09-29 (revised 2026-09-30 for the lifecycle-audit fixes)
 Origin: R10 in workspaces-core-images `design/container-init-requests.md`
 
