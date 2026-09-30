@@ -3,7 +3,7 @@ package systemd1shim
 import "testing"
 
 // Distinct unit names must not share a state record or stop one another.
-func TestAuditUnitNameEscapingIsInjective(t *testing.T) {
+func TestUnitNameEscapingIsInjective(t *testing.T) {
 	m := newManager(&captureEmitter{}, nil)
 	const first, second = "app-a.scope", "app_2da.scope"
 	m.StartUnit(first, "replace")

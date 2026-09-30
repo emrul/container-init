@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestAuditQuotedEnvironmentAssignment(t *testing.T) {
+func TestQuotedEnvironmentAssignment(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "quoted.service")
 	if err := os.WriteFile(p, []byte("[Service]\nExecStart=/bin/true\nEnvironment=\"GREETING=hello world\" EMPTY=\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -21,7 +21,7 @@ func TestAuditQuotedEnvironmentAssignment(t *testing.T) {
 	}
 }
 
-func TestAuditQuotedEnvironmentFilePreservesTrailingSpace(t *testing.T) {
+func TestQuotedEnvironmentFilePreservesTrailingSpace(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "env")
 	if err := os.WriteFile(p, []byte("VALUE='keep trailing space '\n"), 0o600); err != nil {
 		t.Fatal(err)

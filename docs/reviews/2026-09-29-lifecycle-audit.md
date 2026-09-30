@@ -2,6 +2,12 @@
 
 Reviewed commit: `7aa3153` (2026-09-29).
 
+> Names below are as they were at review time. The tests have since been
+> renamed: `TestAuditX` is now `TestX`; `internal/supervisor/audit_regression_test.go`
+> is `lifecycle_test.go`, `unit/audit_regression_test.go` is `quoting_test.go`, and
+> `internal/systemd1shim/audit_regression_test.go` is `escape_test.go`; and
+> `CONTAINER_INIT_AUDIT_PRIVILEGED` is `CONTAINER_INIT_TEST_PRIVILEGED`.
+
 Production code is unchanged. This review adds 12 regression tests across three
 files. Eleven tests fail on the reviewed commit; one disproves a suspected output
 descriptor leak. An existing Linux test also exposes a data race. There are 11

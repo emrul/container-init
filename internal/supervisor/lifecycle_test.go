@@ -21,8 +21,8 @@ import (
 	"github.com/emrul/container-init/unit"
 )
 
-// auditSupervisor provides the real dispatcher without eager boot activation.
-func auditSupervisor(t *testing.T, us ...*unit.Unit) *Supervisor {
+// bareSupervisor provides the real dispatcher without eager boot activation.
+func bareSupervisor(t *testing.T, us ...*unit.Unit) *Supervisor {
 	t.Helper()
 	d := pid1.NewDispatcher()
 	done := make(chan struct{})
@@ -36,7 +36,7 @@ func auditSupervisor(t *testing.T, us ...*unit.Unit) *Supervisor {
 	return s
 }
 
-func auditWait(t *testing.T, what string, f func() bool) {
+func waitFor(t *testing.T, what string, f func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
@@ -48,14 +48,14 @@ func auditWait(t *testing.T, what string, f func() bool) {
 	t.Fatalf("timed out waiting for %s", what)
 }
 
-func TestAuditConcurrentOnFailureShutdownOwnsEveryProcess(t *testing.T) {
+func TestConcurrentOnFailureShutdownOwnsEveryProcess(t *testing.T) {
 	u := &unit.Unit{Name: "shared-handler.service", Kind: unit.KindService, Type: unit.TypeOneshot,
 		ExecStart: []string{"/bin/sleep", "60"}}
-	s := auditSupervisor(t, u)
+	s := bareSupervisor(t, u)
 	firstDone, secondDone := make(chan struct{}), make(chan struct{})
 	go func() { s.fireOnFailure(u.Name); close(firstDone) }()
 	var first int
-	auditWait(t, "first failure handler", func() bool {
+	waitFor(t, "first failure handler", func() bool {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		if st := s.services[u.Name]; st != nil {
@@ -91,13 +91,13 @@ func TestAuditConcurrentOnFailureShutdownOwnsEveryProcess(t *testing.T) {
 	}
 }
 
-func TestAuditCompletedSpawnsReleaseOutputDescriptors(t *testing.T) {
+func TestCompletedSpawnsReleaseOutputDescriptors(t *testing.T) {
 	runtime.GC()
 	old := debug.SetGCPercent(-1)
 	defer func() { debug.SetGCPercent(old); runtime.GC() }()
-	u := &unit.Unit{Name: "fd-audit.service", Kind: unit.KindService, Type: unit.TypeOneshot,
+	u := &unit.Unit{Name: "fd.service", Kind: unit.KindService, Type: unit.TypeOneshot,
 		ExecStart: []string{"/bin/true"}}
-	s := auditSupervisor(t, u)
+	s := bareSupervisor(t, u)
 	count := func() int {
 		entries, err := os.ReadDir("/proc/self/fd")
 		if err != nil {
@@ -119,12 +119,12 @@ func TestAuditCompletedSpawnsReleaseOutputDescriptors(t *testing.T) {
 	}
 }
 
-func TestAuditGroupWithoutUserIsEnforced(t *testing.T) {
+func TestGroupWithoutUserIsEnforced(t *testing.T) {
 	u := &unit.Unit{Name: "group-only.service", Kind: unit.KindService, Type: unit.TypeOneshot}
 	out := filepath.Join(t.TempDir(), "gid")
 	u.ExecStart = []string{"/bin/sh", "-c", "id -g > " + out}
 	u.Group = strconv.Itoa(os.Getegid() + 1)
-	s := auditSupervisor(t, u)
+	s := bareSupervisor(t, u)
 	err := s.spawnAndWait(u, nil, nil)
 	if os.Geteuid() != 0 {
 		if err == nil {
@@ -144,7 +144,7 @@ func TestAuditGroupWithoutUserIsEnforced(t *testing.T) {
 	}
 }
 
-func TestAuditUserIdentityEnvironmentWinsDuplicates(t *testing.T) {
+func TestUserIdentityEnvironmentWinsDuplicates(t *testing.T) {
 	t.Setenv("HOME", "/inherited")
 	t.Setenv("USER", "inherited")
 	t.Setenv("LOGNAME", "inherited")
@@ -157,7 +157,7 @@ func TestAuditUserIdentityEnvironmentWinsDuplicates(t *testing.T) {
 		User: strconv.Itoa(os.Geteuid()), Group: strconv.Itoa(os.Getegid()),
 		Environment: []string{"HOME=/directive", "USER=directive", "LOGNAME=directive"},
 		ExecStart:   []string{"/bin/sh", "-c", `printf '%s|%s|%s' "$HOME" "$USER" "$LOGNAME" > ` + out}}
-	s := auditSupervisor(t, u)
+	s := bareSupervisor(t, u)
 	if err := s.spawnAndWait(u, nil, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +170,7 @@ func TestAuditUserIdentityEnvironmentWinsDuplicates(t *testing.T) {
 	}
 }
 
-func TestAuditSocketModeIsEnforced(t *testing.T) {
+func TestSocketModeIsEnforced(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "private.socket")
 	address := filepath.Join(dir, "private.sock")
@@ -181,7 +181,7 @@ func TestAuditSocketModeIsEnforced(t *testing.T) {
 	if err != nil || len(warnings) != 0 {
 		t.Fatalf("load: %v, warnings=%v", err, warnings)
 	}
-	s := auditSupervisor(t, u)
+	s := bareSupervisor(t, u)
 	s.bindSocket(u)
 	defer s.closeSocket(u.Name)
 	st, err := os.Stat(address)
@@ -195,22 +195,22 @@ func TestAuditSocketModeIsEnforced(t *testing.T) {
 
 // Simulate a cgroup tree becoming unavailable after the manager's successful
 // startup probe. The private mount exists only inside the test container.
-func TestAuditCgroupPlacementFailureStillKillsProcess(t *testing.T) {
-	if os.Getenv("CONTAINER_INIT_AUDIT_PRIVILEGED") != "1" {
-		t.Skip("set CONTAINER_INIT_AUDIT_PRIVILEGED=1 only in a disposable privileged container")
+func TestCgroupPlacementFailureStillKillsProcess(t *testing.T) {
+	if os.Getenv("CONTAINER_INIT_TEST_PRIVILEGED") != "1" {
+		t.Skip("set CONTAINER_INIT_TEST_PRIVILEGED=1 only in a disposable privileged container")
 	}
 	cg := cgroup.New()
 	if os.Geteuid() != 0 || !cg.Available() {
 		t.Skip("needs root and writable cgroup v2 in an isolated container")
 	}
-	if err := syscall.Mount("audit", cg.Base(), "tmpfs", syscall.MS_RDONLY, "mode=0555"); err != nil {
+	if err := syscall.Mount("cgroup-test", cg.Base(), "tmpfs", syscall.MS_RDONLY, "mode=0555"); err != nil {
 		t.Skipf("needs a private privileged mount namespace: %v", err)
 	}
 	defer syscall.Unmount(cg.Base(), 0)
 	up := filepath.Join(t.TempDir(), "up")
-	u := &unit.Unit{Name: "fallback-audit.service", Kind: unit.KindService, Type: unit.TypeSimple,
+	u := &unit.Unit{Name: "fallback.service", Kind: unit.KindService, Type: unit.TypeSimple,
 		ExecStart: []string{"/bin/sh", "-c", "trap '' TERM; touch " + up + "; exec sleep 60"}}
-	s := auditSupervisor(t, u)
+	s := bareSupervisor(t, u)
 	s.cgroup = cg
 	s.SetStopTimeout(100 * time.Millisecond)
 	done := make(chan struct{})
@@ -228,7 +228,7 @@ func TestAuditCgroupPlacementFailureStillKillsProcess(t *testing.T) {
 	}
 }
 
-func TestAuditFailedSocketBlocksRequiredService(t *testing.T) {
+func TestFailedSocketBlocksRequiredService(t *testing.T) {
 	occupied, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -247,11 +247,11 @@ func TestAuditFailedSocketBlocksRequiredService(t *testing.T) {
 	}
 }
 
-func TestAuditOnFailureHonoursMissingRequirement(t *testing.T) {
+func TestOnFailureHonoursMissingRequirement(t *testing.T) {
 	mark := filepath.Join(t.TempDir(), "handler-ran")
 	handler := &unit.Unit{Name: "handler.service", Kind: unit.KindService, Type: unit.TypeOneshot,
 		Requires: []string{"not-installed.service"}, ExecStart: []string{"/bin/touch", mark}}
-	s := auditSupervisor(t, handler)
+	s := bareSupervisor(t, handler)
 	s.fireOnFailure(handler.Name)
 	if _, err := os.Stat(mark); err == nil {
 		t.Error("OnFailure handler ran despite a missing Requires= unit")

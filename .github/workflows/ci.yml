@@ -43,8 +43,8 @@ jobs:
   # neither, so build the tests static and run them as root in a
   # privileged container with its own cgroup namespace -- the same
   # position container-init is in as PID 1. The container is also
-  # disposable, which the cgroup-failure audit test needs: it mounts
-  # over the cgroup tree and is opted in with CONTAINER_INIT_AUDIT_PRIVILEGED.
+  # disposable, which the cgroup-failure test needs: it mounts
+  # over the cgroup tree and is opted in with CONTAINER_INIT_TEST_PRIVILEGED.
   supervisor-privileged:
     runs-on: ubuntu-latest
     steps:
@@ -58,12 +58,12 @@ jobs:
         run: |
           set -o pipefail
           docker run --rm --privileged --cgroupns=private \
-            -e CONTAINER_INIT_AUDIT_PRIVILEGED=1 \
+            -e CONTAINER_INIT_TEST_PRIVILEGED=1 \
             -v "$PWD":/w -w /w/internal/supervisor ubuntu:24.04 \
             sh -c '/w/supervisor.test -test.v && cd /w/internal/socketact && /w/socketact.test -test.v' | tee test.log
           # These must run, not skip.
           for t in TestSpawnStartsInsideUnitCgroup TestSeccompDeniedCloneIntoCgroupFallsBack TestWrapperRunsAsUnitUser \
-                   TestAuditCgroupPlacementFailureStillKillsProcess TestSocketUserAloneTakesItsGroup \
+                   TestCgroupPlacementFailureStillKillsProcess TestSocketUserAloneTakesItsGroup \
                    TestBindPublishesOnlyAfterPermissions TestStateFileWritableDirectoryWarning; do
             grep -q -- "--- PASS: $t " test.log || { echo "::error::$t did not pass"; exit 1; }
           done

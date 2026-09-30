@@ -30,7 +30,7 @@ func TestSocketOwnership(t *testing.T) {
 			u := &unit.Unit{Name: "owned.socket", Kind: unit.KindSocket,
 				ListenStream: []unit.Listener{{Network: "unix", Address: address}},
 				SocketUser:   tc.user, SocketGroup: tc.group, SocketMode: 0o660, SocketModeSet: true}
-			s := auditSupervisor(t, u)
+			s := bareSupervisor(t, u)
 			ok := s.bindSocket(u)
 			defer s.closeSocket(u.Name)
 			if !root {
@@ -82,7 +82,7 @@ func TestSocketUserAloneTakesItsGroup(t *testing.T) {
 	address := filepath.Join(dir, "sock")
 	u := &unit.Unit{Name: "user.socket", Kind: unit.KindSocket,
 		ListenStream: []unit.Listener{{Network: "unix", Address: address}}, SocketUser: "svc"}
-	s := auditSupervisor(t, u)
+	s := bareSupervisor(t, u)
 	if !s.bindSocket(u) {
 		t.Fatal("bind failed")
 	}
@@ -122,7 +122,7 @@ func TestSocketModeFromUnitFile(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			s := auditSupervisor(t, u)
+			s := bareSupervisor(t, u)
 			if !s.bindSocket(u) {
 				t.Fatal("bind failed")
 			}

@@ -18,9 +18,9 @@ import (
 // shutdown: shutdown itself, and main's final flush after it (the
 // tracer's Close), return within the stop timeout.
 func TestShutdownReturnsWithBlockedTrace(t *testing.T) {
-	live := &unit.Unit{Name: "live-audit.service", Kind: unit.KindService, Type: unit.TypeSimple,
+	live := &unit.Unit{Name: "live.service", Kind: unit.KindService, Type: unit.TypeSimple,
 		ExecStart: []string{"/bin/sleep", "60"}}
-	s := auditSupervisor(t, live)
+	s := bareSupervisor(t, live)
 	s.SetStopTimeout(100 * time.Millisecond)
 
 	// A FIFO nobody reads until the end: once its pipe buffer is full
