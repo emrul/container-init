@@ -1436,6 +1436,10 @@ func (s *Supervisor) closeSocket(name string) {
 // exit, then a kill of its whole cgroup (or process group). Reports
 // whether it had to be killed.
 func (s *Supervisor) stopUnit(u *unit.Unit, deadline time.Time) (forced bool) {
+	// Whatever happens below, the unit ends stopped for the final
+	// report -- including a start admitted but not spawned (blocked
+	// reading an EnvironmentFile=, say), which the gate now refuses.
+	defer s.recordStopped(u.Name)
 	s.mu.Lock()
 	st := s.services[u.Name]
 	s.mu.Unlock()
@@ -1447,7 +1451,6 @@ func (s *Supervisor) stopUnit(u *unit.Unit, deadline time.Time) (forced bool) {
 		defer s.mu.Unlock()
 		return st.exited
 	}
-	defer s.recordStopped(u.Name)
 	if !exited() && st.pid > 0 {
 		s.recordStopping(u.Name)
 		sig := u.KillSignal

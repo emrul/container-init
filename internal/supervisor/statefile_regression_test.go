@@ -3,7 +3,9 @@
 package supervisor
 
 import (
+	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -56,6 +58,51 @@ func TestHeartbeatMustNotCertifyExitedRunningUnit(t *testing.T) {
 	// past --max-age, health fails the container.
 	if ok, why := health.Check(f, s.sw.written.Add(health.DefaultMaxAge+time.Second), []string{u.Name}, health.DefaultMaxAge); ok {
 		t.Errorf("health passes a dead service once the heartbeat is stale: %s", why)
+	}
+}
+
+func TestFinalStateStopsStartBlockedBeforeSpawn(t *testing.T) {
+	fifo := filepath.Join(t.TempDir(), "environment")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Holding an RDWR endpoint makes the read block until we close it.
+	hold, err := os.OpenFile(fifo, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := &unit.Unit{Name: "blocked.service", Kind: unit.KindService, Type: unit.TypeSimple,
+		ExecStart: []string{"/bin/true"}, EnvironmentFile: []unit.EnvFileRef{{Path: fifo}}}
+	s := unstartedStateSupervisor(t, u)
+	s.SetStopTimeout(time.Second)
+	s.startStateWriter()
+	done := make(chan struct{})
+	go func() { s.runService(u); close(done) }()
+	t.Cleanup(func() {
+		hold.Close()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Error("blocked start did not exit after releasing its environment file")
+		}
+	})
+	deadline := time.Now().Add(time.Second)
+	for s.State()[u.Name].Runs == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("start not admitted")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// Give the reader time to open the FIFO before cleanup closes it.
+	time.Sleep(20 * time.Millisecond)
+	s.Stop()
+	s.shutdown()
+	f, err := statefile.Read(s.sw.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st := f.Units[u.Name]; st.Active != "inactive" || st.Sub != "dead" {
+		t.Errorf("final shutdown file still says %s/%s for a start that can no longer spawn", st.Active, st.Sub)
 	}
 }
 
