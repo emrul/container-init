@@ -51,6 +51,8 @@ type Dispatcher struct {
 	notify    chan os.Signal
 	stop      <-chan struct{}
 	done      chan struct{}
+	// ping and pong carry liveness checks through the loop; see Ping.
+	ping, pong chan uint64
 }
 
 // NewDispatcher constructs an unstarted dispatcher.
@@ -58,6 +60,8 @@ func NewDispatcher() *Dispatcher {
 	return &Dispatcher{
 		pending: make(map[int]chan ExitStatus),
 		done:    make(chan struct{}),
+		ping:    make(chan uint64, 1),
+		pong:    make(chan uint64, 1),
 	}
 }
 
@@ -134,9 +138,36 @@ func (d *Dispatcher) loop() {
 			return
 		case <-d.notify:
 			// Coalesce: drain reaps everything currently waitable.
+		case seq := <-d.ping:
+			// Answer only after a drain of our own: it takes the
+			// lock, so a wedged drain or a stuck Spawn holding it
+			// keeps the answer from coming.
+			d.drain()
+			select {
+			case d.pong <- seq:
+			default: // an unread answer is still there
+			}
 		}
 	}
 }
+
+// Ping asks the loop to show it is live: it answers seq on Pongs once
+// it has drained, between drains, as it does its real work. It never
+// blocks: it reports false, queueing nothing, while an earlier ping is
+// still unanswered, so however long the loop is stuck at most one ping
+// is outstanding.
+func (d *Dispatcher) Ping(seq uint64) bool {
+	select {
+	case d.ping <- seq:
+		return true
+	default:
+		return false
+	}
+}
+
+// Pongs is where the loop answers pings, with their seq. A reader
+// should discard a seq older than the one it waits for.
+func (d *Dispatcher) Pongs() <-chan uint64 { return d.pong }
 
 func (d *Dispatcher) drain() {
 	d.mu.Lock()

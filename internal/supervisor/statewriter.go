@@ -1,9 +1,12 @@
 package supervisor
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -31,6 +34,7 @@ const (
 type stateWriter struct {
 	path, version string
 	tick          time.Duration
+	budget        time.Duration // checkBudget; a field for tests
 	// write replaces the file; a field so tests can stall it.
 	write func(path string, f *statefile.File) ([]string, error)
 
@@ -46,6 +50,19 @@ type stateWriter struct {
 	last     map[string]statefile.Unit
 	failing  bool
 	dirNoted bool
+	pingSeq  uint64
+	// suspect holds the pids that looked exited-but-unhandled on the
+	// last heartbeat; a second sighting fails the check.
+	suspect map[int]bool
+	// checkFailed is the heartbeat check failing now, "" when all pass.
+	checkFailed string
+}
+
+// liveness is the reaper's side of heartbeat check 2: pid1.Dispatcher,
+// or a stand-in in tests.
+type liveness interface {
+	Ping(seq uint64) bool
+	Pongs() <-chan uint64
 }
 
 // SetStateFile makes Run write every unit's state to path (see
@@ -60,6 +77,7 @@ func (s *Supervisor) SetStateFile(path, version string) {
 		path:    path,
 		version: version,
 		tick:    heartbeatInterval,
+		budget:  checkBudget,
 		write:   statefile.Write,
 		wrote:   make(chan struct{}),
 		quit:    make(chan struct{}),
@@ -117,12 +135,13 @@ func (s *Supervisor) writeState(beat bool) {
 	}()
 
 	now := time.Now()
-	units, ok := s.snapshotState(now.Add(checkBudget))
+	deadline := now.Add(w.budget)
+	units, running, ok := s.snapshotState(deadline)
 	if ok {
 		w.last = units
 	}
-	if beat && ok {
-		w.written = now
+	if beat {
+		s.heartbeat(now, deadline, ok, running)
 	}
 	if w.last == nil {
 		return // nothing to report yet
@@ -158,21 +177,114 @@ func (s *Supervisor) writeState(beat bool) {
 	}
 }
 
-// snapshotState copies every unit's state, taking the state lock with
-// TryLock, retried until deadline, from the writer goroutine itself:
-// a supervisor stuck holding it leaves nothing behind waiting on it.
-func (s *Supervisor) snapshotState(deadline time.Time) (map[string]statefile.Unit, bool) {
+// snapshotState copies every unit's state, and the pid of each unit
+// recorded running (or, for a oneshot, start) whose exit has not been
+// seen. It takes the state lock with TryLock, retried until deadline,
+// from the writer goroutine itself: a supervisor stuck holding it
+// leaves nothing behind waiting on it.
+func (s *Supervisor) snapshotState(deadline time.Time) (map[string]statefile.Unit, map[string]int, bool) {
 	for {
 		if s.mu.TryLock() {
 			units := s.stateLocked()
+			running := map[string]int{}
+			for name, st := range units {
+				live := st.Active == statefile.ActiveActive && st.Sub == statefile.SubRunning ||
+					st.Active == statefile.ActiveActivating && st.Sub == statefile.SubStart
+				if p := s.services[name]; live && p != nil && !p.exited && p.pid > 0 {
+					running[name] = p.pid
+				}
+			}
 			s.mu.Unlock()
-			return units, true
+			return units, running, true
 		}
 		if time.Now().After(deadline) {
-			return nil, false
+			return nil, nil, false
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+}
+
+// heartbeat advances `written` to now if the supervisor passes every
+// check within the budget ending at deadline: the state lock was taken
+// (locked), the reaper answers, and every exit has been noticed.
+// Nothing it does can pile up while the supervisor stays stuck: the
+// lock was only tried, and at most one ping is ever outstanding.
+func (s *Supervisor) heartbeat(now, deadline time.Time, locked bool, running map[string]int) {
+	w := s.sw
+	failed := ""
+	switch {
+	case !locked:
+		failed = "the state lock was not free within " + w.budget.String()
+	case !s.pingReaper(deadline):
+		failed = "the reaper did not answer within " + w.budget.String()
+	default:
+		failed = w.checkExits(running)
+	}
+	if failed == "" {
+		w.written = now
+		if w.checkFailed != "" {
+			log.Printf("state file: heartbeat checks pass again")
+		}
+	} else if failed != w.checkFailed {
+		log.Printf("state file: heartbeat check failed: %s; not advancing written", failed)
+	}
+	w.checkFailed = failed
+}
+
+// pingReaper sends one ping through the dispatcher's loop and waits
+// until deadline for its answer. A ping still unanswered from an
+// earlier heartbeat makes the send fail, and this heartbeat with it.
+func (s *Supervisor) pingReaper(deadline time.Time) bool {
+	w := s.sw
+	pongs := s.live.Pongs()
+	for drained := false; !drained; {
+		select {
+		case <-pongs: // a late answer to an earlier ping
+		default:
+			drained = true
+		}
+	}
+	w.pingSeq++
+	seq := w.pingSeq
+	if !s.live.Ping(seq) {
+		return false
+	}
+	timer := time.NewTimer(time.Until(deadline))
+	defer timer.Stop()
+	for {
+		select {
+		case got := <-pongs:
+			if got == seq {
+				return true
+			}
+		case <-timer.C:
+			return false
+		}
+	}
+}
+
+// checkExits fails when a unit's recorded process is a zombie, or gone
+// while the unit is still recorded running, on two heartbeats in a
+// row: its exit was not reaped, or not handled. One sighting can be the
+// normal moment between an exit and its handling.
+func (w *stateWriter) checkExits(running map[string]int) string {
+	suspect := map[int]bool{}
+	var stuck []string
+	for name, pid := range running {
+		if processRunning(pid) {
+			continue
+		}
+		suspect[pid] = true
+		if w.suspect[pid] {
+			stuck = append(stuck, fmt.Sprintf("%s (pid %d)", name, pid))
+		}
+	}
+	w.suspect = suspect
+	if len(stuck) == 0 {
+		return ""
+	}
+	sort.Strings(stuck)
+	return "exit not handled for " + strings.Join(stuck, ", ")
 }
 
 // waitStateWrite waits until a write begun after the writer's seq-th

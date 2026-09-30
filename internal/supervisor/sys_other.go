@@ -28,3 +28,7 @@ func processAlive(pid int) bool {
 	err := syscall.Kill(pid, 0)
 	return err != syscall.ESRCH
 }
+
+// processRunning cannot tell a zombie apart without /proc; it reports
+// whether pid exists.
+func processRunning(pid int) bool { return processAlive(pid) }

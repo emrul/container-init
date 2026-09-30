@@ -3,6 +3,9 @@
 package supervisor
 
 import (
+	"bytes"
+	"os"
+	"strconv"
 	"syscall"
 )
 
@@ -52,4 +55,19 @@ func killGroup(pid int, sig syscall.Signal) error {
 func processAlive(pid int) bool {
 	err := syscall.Kill(pid, 0)
 	return err != syscall.ESRCH
+}
+
+// processRunning reports whether pid exists and is not a zombie, from
+// the state field of /proc/<pid>/stat (the first field after the
+// command name's closing parenthesis, which may itself contain one).
+func processRunning(pid int) bool {
+	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if err != nil {
+		return false
+	}
+	i := bytes.LastIndexByte(b, ')')
+	if i < 0 || i+2 >= len(b) {
+		return false
+	}
+	return b[i+2] != 'Z'
 }

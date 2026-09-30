@@ -176,3 +176,53 @@ func TestDispatcherConcurrentSpawn(t *testing.T) {
 type timeoutErr struct{}
 
 func (timeoutErr) Error() string { return "timeout" }
+
+// A ping is answered with its seq while the loop is free; while the lock
+// is held (a stuck Spawn or drain) it is not, and no second ping queues.
+func TestDispatcherPing(t *testing.T) {
+	d := NewDispatcher()
+	stop := make(chan struct{})
+	defer close(stop)
+	d.Start(stop)
+
+	if !d.Ping(1) {
+		t.Fatal("Ping refused on an idle loop")
+	}
+	select {
+	case seq := <-d.Pongs():
+		if seq != 1 {
+			t.Errorf("pong %d, want 1", seq)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("idle loop did not answer")
+	}
+
+	d.mu.Lock() // as a stuck Spawn would
+	if !d.Ping(2) {
+		t.Fatal("Ping refused with nothing outstanding")
+	}
+	time.Sleep(50 * time.Millisecond) // the loop takes it, then waits for the lock
+	sent := 0
+	for i := 0; i < 10; i++ {
+		if d.Ping(uint64(3 + i)) {
+			sent++
+		}
+	}
+	if sent > 1 {
+		t.Errorf("%d more pings queued while the loop was stuck, want at most 1", sent)
+	}
+	select {
+	case seq := <-d.Pongs():
+		t.Fatalf("stuck loop answered pong %d", seq)
+	case <-time.After(200 * time.Millisecond):
+	}
+	d.mu.Unlock()
+	select {
+	case seq := <-d.Pongs():
+		if seq != 2 {
+			t.Errorf("pong %d after release, want 2", seq)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("loop did not answer once released")
+	}
+}

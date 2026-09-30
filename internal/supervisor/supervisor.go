@@ -91,6 +91,8 @@ type Supervisor struct {
 	changed chan struct{}
 	// sw writes the state file; nil unless SetStateFile named one.
 	sw *stateWriter
+	// live answers the heartbeat's reaper check: the dispatcher.
+	live liveness
 	// cgroupProbe decides, once, whether children can be spawned
 	// straight into their cgroup; see canSpawnIntoCgroup.
 	cgroupProbe       sync.Once
@@ -168,6 +170,7 @@ func New(units []*unit.Unit, tracer *trace.Tracer, dispatcher *pid1.Dispatcher, 
 		status:      initStatus(ordered, started),
 		started:     started,
 		changed:     make(chan struct{}, 1),
+		live:        dispatcher,
 		wrapper:     "/proc/self/exe",
 	}, nil
 }
