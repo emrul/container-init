@@ -50,9 +50,10 @@ policy, passed to `health` as flags; PID 1 never decides health.
 ## The state file
 
 `--state-file <path>` (empty, the default, disables it). PID 1 writes
-the file at startup, before the first unit starts; on every unit state
-change; and on the heartbeat, at least every 10 s, updating `written`.
-Writes may be coalesced.
+the file at startup, before the first unit starts (waiting for that
+first write at most 2 s, so a hung filesystem cannot hold up the
+boot); on every unit state change; and on the heartbeat, at least
+every 10 s, updating `written`. Writes may be coalesced.
 
 The shape borrows systemd's words, limited to what the supervisor
 produces today. Example, with the window manager crashing into its
@@ -303,6 +304,8 @@ what the image's own probes are for.
   and the final write, with every unit stopped, is attempted within
   reverse shutdown's own deadline (the one given to the tracer): PID
   1 waits for it no longer than that, and adds no time of its own.
+  The writer then stops, so no write is left half-done behind PID 1's
+  exit unless the deadline had already passed.
 
 Pick a path in a directory only PID 1's uid can write:
 

@@ -37,6 +37,7 @@ func main() {
 	validate := flag.Bool("validate", false, "load + parse units, print summary, exit without supervising (build-time sanity)")
 	systemd1Shim := flag.String("systemd1-shim", "", "comma-separated D-Bus addresses to register org.freedesktop.systemd1 on (e.g. \"user:1000\" or \"user:env:KASM_OS_UID\"); empty disables")
 	stopTimeout := flag.Duration("stop-timeout", 8*time.Second, "bound on the whole reverse shutdown; units still running after it are killed (keep it under docker stop's timeout, 10s by default)")
+	stateFile := flag.String("state-file", "", "write every unit's state to this JSON file, for container-init health (empty: off)")
 	versionFlag := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
@@ -121,6 +122,7 @@ func main() {
 		exitWith(64)
 	}
 	sup.SetStopTimeout(*stopTimeout)
+	sup.SetStateFile(*stateFile, version)
 
 	// Compatibility shim for clients that probe systemd by spawning
 	// systemd-run (notably Ptyxis). Off by default; opt-in via flag.

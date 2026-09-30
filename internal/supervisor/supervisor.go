@@ -89,6 +89,8 @@ type Supervisor struct {
 	status  map[string]*statefile.Unit
 	started time.Time
 	changed chan struct{}
+	// sw writes the state file; nil unless SetStateFile named one.
+	sw *stateWriter
 	// cgroupProbe decides, once, whether children can be spawned
 	// straight into their cgroup; see canSpawnIntoCgroup.
 	cgroupProbe       sync.Once
@@ -296,6 +298,8 @@ func (s *Supervisor) Run() int {
 		}
 	}
 
+	s.startStateWriter()
+
 	bindFailed := map[string]bool{}
 	// Pass 1: bind every .socket whose conditions allow. Skipped
 	// sockets (and their attached services) immediately signal ready
@@ -422,7 +426,10 @@ func deferredOnFailure(units []*unit.Unit, u *unit.Unit) bool {
 
 // Stop signals the supervisor to begin reverse shutdown. Idempotent.
 func (s *Supervisor) Stop() {
-	s.stopOnce.Do(func() { close(s.stopCh) })
+	s.stopOnce.Do(func() {
+		close(s.stopCh)
+		s.stateChanged() // report pid1.stopping at once
+	})
 }
 
 // stopping reports whether reverse shutdown has begun. A unit that
@@ -1390,6 +1397,7 @@ func (s *Supervisor) shutdown() int {
 		}(u)
 	}
 	wg.Wait()
+	s.closeState(deadline)
 
 	exit := 0
 	if forced.Load() {
