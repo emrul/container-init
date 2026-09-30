@@ -16,6 +16,7 @@ import (
 
 	"github.com/emrul/container-init/internal/cgroup"
 	"github.com/emrul/container-init/internal/execwrap"
+	"github.com/emrul/container-init/internal/health"
 	"github.com/emrul/container-init/internal/pid1"
 	"github.com/emrul/container-init/internal/supervisor"
 	"github.com/emrul/container-init/internal/systemd1shim"
@@ -30,6 +31,11 @@ func main() {
 	// A service spawn re-executes this binary as its first step; that
 	// never returns. See execwrap.
 	execwrap.Main()
+	// `container-init health` reads the state file and exits; it touches
+	// no PID 1 state.
+	if len(os.Args) > 1 && os.Args[1] == "health" {
+		os.Exit(health.Main(os.Args[2:], os.Stdout, time.Now()))
+	}
 
 	dir := flag.String("units", "/etc/container-init/units", "directory containing core .service / .socket files")
 	dropIn := flag.String("drop-in", "/etc/container-init.d", "directory containing image-author drop-ins (override core by name)")
