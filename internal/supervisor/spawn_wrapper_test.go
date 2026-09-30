@@ -35,6 +35,7 @@ func startSupervisor(t *testing.T, us []*unit.Unit, configure func(*Supervisor))
 		sup.Stop()
 		<-runDone
 		close(dispStop)
+		<-d.Done()
 	})
 	return sup
 }

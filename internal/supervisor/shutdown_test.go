@@ -35,7 +35,7 @@ func runAndStop(t *testing.T, stopTimeout time.Duration, ups []string, us ...*un
 	t.Helper()
 	d := pid1.NewDispatcher()
 	dispStop := make(chan struct{})
-	defer close(dispStop)
+	defer func() { close(dispStop); <-d.Done() }()
 	d.Start(dispStop)
 	sup, err := New(us, nil, d, &cgroup.Manager{})
 	if err != nil {
@@ -202,7 +202,7 @@ func TestSocketClosesAfterItsDependentsStop(t *testing.T) {
 
 			d := pid1.NewDispatcher()
 			dispStop := make(chan struct{})
-			defer close(dispStop)
+			defer func() { close(dispStop); <-d.Done() }()
 			d.Start(dispStop)
 			sup, err := New([]*unit.Unit{sock, svc, consumer}, nil, d, &cgroup.Manager{})
 			if err != nil {
@@ -299,7 +299,7 @@ func TestProxySocketServesDuringShutdown(t *testing.T) {
 
 	d := pid1.NewDispatcher()
 	dispStop := make(chan struct{})
-	defer close(dispStop)
+	defer func() { close(dispStop); <-d.Done() }()
 	d.Start(dispStop)
 	sup, err := New([]*unit.Unit{sock, svc, consumer}, nil, d, &cgroup.Manager{})
 	if err != nil {

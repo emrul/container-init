@@ -28,7 +28,7 @@ func stateSupervisor(t *testing.T, path string, configure func(*stateWriter), us
 	d := pid1.NewDispatcher()
 	dispStop := make(chan struct{})
 	d.Start(dispStop)
-	t.Cleanup(func() { close(dispStop) })
+	t.Cleanup(func() { close(dispStop); <-d.Done() })
 	sup, err := New(us, nil, d, &cgroup.Manager{})
 	if err != nil {
 		t.Fatal(err)

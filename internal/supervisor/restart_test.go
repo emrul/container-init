@@ -73,7 +73,7 @@ func TestRestartOnFailure(t *testing.T) {
 
 	d := pid1.NewDispatcher()
 	dispStop := make(chan struct{})
-	defer close(dispStop)
+	defer func() { close(dispStop); <-d.Done() }()
 	d.Start(dispStop)
 
 	sup, err := New([]*unit.Unit{u}, nil, d, &cgroup.Manager{})

@@ -53,7 +53,7 @@ func TestStartFailureSettlesDependents(t *testing.T) {
 
 	d := pid1.NewDispatcher()
 	dispStop := make(chan struct{})
-	defer close(dispStop)
+	defer func() { close(dispStop); <-d.Done() }()
 	d.Start(dispStop)
 
 	sup, err := New([]*unit.Unit{broken, ordered, requiring}, nil, d, &cgroup.Manager{})
@@ -117,7 +117,7 @@ func TestNonRootUserUnits(t *testing.T) {
 
 	d := pid1.NewDispatcher()
 	dispStop := make(chan struct{})
-	defer close(dispStop)
+	defer func() { close(dispStop); <-d.Done() }()
 	d.Start(dispStop)
 
 	sup, err := New([]*unit.Unit{same, other}, nil, d, &cgroup.Manager{})
@@ -177,7 +177,7 @@ func TestSkippedServiceSocketNotBound(t *testing.T) {
 
 			d := pid1.NewDispatcher()
 			dispStop := make(chan struct{})
-			defer close(dispStop)
+			defer func() { close(dispStop); <-d.Done() }()
 			d.Start(dispStop)
 
 			sup, err := New([]*unit.Unit{sock, svc}, nil, d, &cgroup.Manager{})
@@ -239,7 +239,7 @@ func TestStartLimitFailsUnit(t *testing.T) {
 
 	d := pid1.NewDispatcher()
 	dispStop := make(chan struct{})
-	defer close(dispStop)
+	defer func() { close(dispStop); <-d.Done() }()
 	d.Start(dispStop)
 
 	sup, err := New([]*unit.Unit{flaky, dependent}, nil, d, &cgroup.Manager{})
@@ -291,6 +291,7 @@ func runUnits(t *testing.T, us ...*unit.Unit) *Supervisor {
 	sup, err := New(us, nil, d, &cgroup.Manager{})
 	if err != nil {
 		close(dispStop)
+		<-d.Done()
 		t.Fatalf("New: %v", err)
 	}
 	runDone := make(chan struct{})
@@ -299,6 +300,7 @@ func runUnits(t *testing.T, us ...*unit.Unit) *Supervisor {
 		sup.Stop()
 		<-runDone
 		close(dispStop)
+		<-d.Done()
 	})
 	return sup
 }
@@ -518,7 +520,7 @@ func TestMissingRequirementNotStarted(t *testing.T) {
 
 	d := pid1.NewDispatcher()
 	dispStop := make(chan struct{})
-	defer close(dispStop)
+	defer func() { close(dispStop); <-d.Done() }()
 	d.Start(dispStop)
 
 	// Requires= the orphan with no ordering: the missing unit two levels

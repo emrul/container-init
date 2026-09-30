@@ -287,7 +287,7 @@ func TestStateAfterShutdown(t *testing.T) {
 	failed := shService("failed.service", unit.TypeSimple, "exit 2")
 	d := pid1.NewDispatcher()
 	dispStop := make(chan struct{})
-	defer close(dispStop)
+	defer func() { close(dispStop); <-d.Done() }()
 	d.Start(dispStop)
 	sup, err := New([]*unit.Unit{running, failed}, nil, d, &cgroup.Manager{})
 	if err != nil {

@@ -16,7 +16,7 @@ import (
 func TestDispatcherSpawnDelivers(t *testing.T) {
 	d := NewDispatcher()
 	stop := make(chan struct{})
-	defer close(stop)
+	defer func() { close(stop); <-d.Done() }()
 	d.Start(stop)
 
 	cmd := exec.Command("/bin/sh", "-c", "exit 7")
@@ -57,7 +57,7 @@ func TestDispatcherSpawnDelivers(t *testing.T) {
 func TestDispatcherSpawnSignaled(t *testing.T) {
 	d := NewDispatcher()
 	stop := make(chan struct{})
-	defer close(stop)
+	defer func() { close(stop); <-d.Done() }()
 	d.Start(stop)
 
 	cmd := exec.Command("/bin/sleep", "30")
@@ -91,7 +91,7 @@ func TestDispatcherSpawnSignaled(t *testing.T) {
 func TestDispatcherOrphanReaped(t *testing.T) {
 	d := NewDispatcher()
 	stop := make(chan struct{})
-	defer close(stop)
+	defer func() { close(stop); <-d.Done() }()
 	d.Start(stop)
 
 	// Parent shell forks a backgrounded sleep then exits. The sleep
@@ -140,7 +140,7 @@ func TestDispatcherOrphanReaped(t *testing.T) {
 func TestDispatcherConcurrentSpawn(t *testing.T) {
 	d := NewDispatcher()
 	stop := make(chan struct{})
-	defer close(stop)
+	defer func() { close(stop); <-d.Done() }()
 	d.Start(stop)
 
 	const N = 32
@@ -182,7 +182,7 @@ func (timeoutErr) Error() string { return "timeout" }
 func TestDispatcherPing(t *testing.T) {
 	d := NewDispatcher()
 	stop := make(chan struct{})
-	defer close(stop)
+	defer func() { close(stop); <-d.Done() }()
 	d.Start(stop)
 
 	if !d.Ping(1) {
