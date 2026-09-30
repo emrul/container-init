@@ -116,6 +116,9 @@ type serviceState struct {
 	// unit's cgroup, so cgroup.kill reaches it. False when cgroup v2 is
 	// off or placing it failed: it is then killed by pid and group.
 	inCgroup bool
+	// run is the unit's runs count this process belongs to, so the
+	// heartbeat can tell it from a newer run not yet spawned.
+	run int
 }
 
 // New constructs a supervisor for the given units. The dispatcher
@@ -799,6 +802,9 @@ func (s *Supervisor) spawnAndWait(u *unit.Unit, extra *socketact.Bound, onSpawne
 
 	state := &serviceState{name: u.Name, pid: pid, startedAt: time.Now(), inCgroup: inCgroup}
 	s.mu.Lock()
+	if st := s.status[u.Name]; st != nil {
+		state.run = st.Runs
+	}
 	s.services[u.Name] = state
 	s.mu.Unlock()
 	s.spawnGate.RUnlock()

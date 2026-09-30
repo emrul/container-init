@@ -436,9 +436,16 @@ func TestHeartbeatUnhandledExit(t *testing.T) {
 	if !strings.Contains(logs.String(), "exit not handled for ghost.service") {
 		t.Errorf("no log naming the unhandled exit:\n%s", logs.String())
 	}
-	// Handled at last: the heartbeat resumes.
+	// Seeing the exit is not enough while the unit is still reported
+	// running; handling it -- the state moving on -- resumes the
+	// heartbeat.
 	sup.mu.Lock()
 	sup.services[ghost.Name].exited = true
 	sup.mu.Unlock()
+	time.Sleep(200 * time.Millisecond)
+	if f, _ := statefile.Read(path); !f.Written.Equal(now.Written.Time) {
+		t.Errorf("written advanced to %v with the exit seen but the unit still running", f.Written)
+	}
+	sup.setState(ghost.Name, "inactive", "dead")
 	waitStateFile(t, path, "advanced written again", func(f *statefile.File) bool { return f.Written.After(now.Written.Time) })
 }

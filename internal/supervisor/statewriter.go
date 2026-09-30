@@ -181,21 +181,29 @@ func (s *Supervisor) writeState(beat bool) {
 	}
 }
 
-// snapshotState copies every unit's state, and the pid of each unit
-// recorded running (or, for a oneshot, start) whose exit has not been
-// seen. It takes the state lock with TryLock, retried until deadline,
-// from the writer goroutine itself: a supervisor stuck holding it
-// leaves nothing behind waiting on it.
-func (s *Supervisor) snapshotState(deadline time.Time) (map[string]statefile.Unit, map[string]int, bool) {
+// runningProc is the process of a unit recorded running (or, for a
+// oneshot, start), as the heartbeat checks it.
+type runningProc struct {
+	pid    int
+	exited bool // its exit was seen, yet the unit is still recorded running
+}
+
+// snapshotState copies every unit's state, and the process of each unit
+// recorded running (or, for a oneshot, start) in its current run. A
+// start admitted but not yet spawned has no process of its current run
+// and is left out. It takes the state lock with TryLock, retried until
+// deadline, from the writer goroutine itself: a supervisor stuck
+// holding it leaves nothing behind waiting on it.
+func (s *Supervisor) snapshotState(deadline time.Time) (map[string]statefile.Unit, map[string]runningProc, bool) {
 	for {
 		if s.mu.TryLock() {
 			units := s.stateLocked()
-			running := map[string]int{}
+			running := map[string]runningProc{}
 			for name, st := range units {
 				live := st.Active == statefile.ActiveActive && st.Sub == statefile.SubRunning ||
 					st.Active == statefile.ActiveActivating && st.Sub == statefile.SubStart
-				if p := s.services[name]; live && p != nil && !p.exited && p.pid > 0 {
-					running[name] = p.pid
+				if p := s.services[name]; live && p != nil && p.run == st.Runs && p.pid > 0 {
+					running[name] = runningProc{pid: p.pid, exited: p.exited}
 				}
 			}
 			s.mu.Unlock()
@@ -213,7 +221,7 @@ func (s *Supervisor) snapshotState(deadline time.Time) (map[string]statefile.Uni
 // (locked), the reaper answers, and every exit has been noticed.
 // Nothing it does can pile up while the supervisor stays stuck: the
 // lock was only tried, and at most one ping is ever outstanding.
-func (s *Supervisor) heartbeat(now, deadline time.Time, locked bool, running map[string]int) {
+func (s *Supervisor) heartbeat(now, deadline time.Time, locked bool, running map[string]runningProc) {
 	w := s.sw
 	failed := ""
 	switch {
@@ -267,20 +275,21 @@ func (s *Supervisor) pingReaper(deadline time.Time) bool {
 	}
 }
 
-// checkExits fails when a unit's recorded process is a zombie, or gone
-// while the unit is still recorded running, on two heartbeats in a
-// row: its exit was not reaped, or not handled. One sighting can be the
+// checkExits fails when a unit is still recorded running although its
+// process is a zombie, gone, or already seen to exit, on two heartbeats
+// in a row: its exit was not reaped, or not handled -- the report would
+// otherwise vouch for a service that is dead. One sighting can be the
 // normal moment between an exit and its handling.
-func (w *stateWriter) checkExits(running map[string]int) string {
+func (w *stateWriter) checkExits(running map[string]runningProc) string {
 	suspect := map[int]bool{}
 	var stuck []string
-	for name, pid := range running {
-		if processRunning(pid) {
+	for name, p := range running {
+		if !p.exited && processRunning(p.pid) {
 			continue
 		}
-		suspect[pid] = true
-		if w.suspect[pid] {
-			stuck = append(stuck, fmt.Sprintf("%s (pid %d)", name, pid))
+		suspect[p.pid] = true
+		if w.suspect[p.pid] {
+			stuck = append(stuck, fmt.Sprintf("%s (pid %d)", name, p.pid))
 		}
 	}
 	w.suspect = suspect
