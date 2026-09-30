@@ -280,7 +280,8 @@ what the image's own probes are for.
   open a fixed temporary name, never chmod or chown by path. The file
   is 0644.
 - If the target's directory does not exist, PID 1 creates it (and
-  any missing parents) 0755, owned by PID 1's uid. It never changes
+  any missing parents) 0755, owned by PID 1's uid (see below for a
+  parent another uid can write). It never changes
   the mode or owner of a directory that already exists. `/run` is
   usually a tmpfs that starts empty, so a directory made at image
   build time is not there at runtime; this is why PID 1 creates it.
@@ -288,9 +289,25 @@ what the image's own probes are for.
   PID 1 logs a warning once: that user can replace the file and forge
   the report. Writing stays safe (the exclusive temp file and rename
   never follow a planted name), only the contents cannot be trusted.
-- `os.CreateTemp` creates the file 0600; the writer sets 0644 with
-  `Chmod` on the open file, before the rename, so no mode or owner is
-  ever set by path.
+- Past the directories that already exist, everything is done through
+  directory descriptors, never by path: each directory PID 1 creates
+  is made with `mkdirat` in the directory opened before it, opened
+  with `O_NOFOLLOW`, and checked to be a directory PID 1's uid owns.
+  Its mode is set to exactly 0755 with `fchmod` only when that parent
+  is trusted -- owned by PID 1's uid or root and writable by nobody
+  else, or sticky -- so nobody could have replaced it between the
+  `mkdirat` and the `fchmod`. Beneath any other parent it keeps the
+  mode `mkdirat` gave it (0755 less the umask), nothing is chmod'ed,
+  and PID 1 logs a warning. The temporary file is created
+  `O_EXCL|O_NOFOLLOW` in the opened directory, set to 0644 with
+  `fchmod`, written and closed -- a failure at any step, the close's
+  included, leaves the previous file in place -- and renamed over the
+  target with `renameat` in that same directory. Someone able to
+  rename things along the path cannot turn a chmod, or the file, onto
+  anything else. Directories that already
+  exist are followed as they are (a `/var/run` symlink is the image's
+  layout, not an attack), and one made by someone else in the meantime
+  is used but never chmod'ed.
 - A write that fails (disk full, read-only filesystem) is logged once
   and retried on the next change or heartbeat. PID 1 keeps
   supervising and never exits over it.

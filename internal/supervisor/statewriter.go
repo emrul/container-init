@@ -36,7 +36,7 @@ type stateWriter struct {
 	tick          time.Duration
 	budget        time.Duration // checkBudget; a field for tests
 	// write replaces the file; a field so tests can stall it.
-	write func(path string, f *statefile.File) ([]string, error)
+	write func(path string, f *statefile.File) (statefile.Result, error)
 
 	mu        sync.Mutex
 	seq       uint64        // writes begun
@@ -156,9 +156,13 @@ func (s *Supervisor) writeState(beat bool) {
 		},
 		Units: w.last,
 	}
-	created, err := w.write(w.path, f)
-	for _, d := range created {
+	res, err := w.write(w.path, f)
+	for _, d := range res.Created {
 		log.Printf("state file: created directory %s", d)
+	}
+	for _, d := range res.Unwidened {
+		log.Printf("state file: warning: created %s beneath a directory another uid can write; "+
+			"left at mkdir's mode rather than set to 0755, since that uid could have replaced it", d)
 	}
 	if err != nil {
 		if !w.failing {

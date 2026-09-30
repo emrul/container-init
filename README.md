@@ -611,7 +611,8 @@ the child reaper answers, and no unit's exit has gone unhandled -- so a
 hung container-init goes stale and unhealthy.
 
 The file is written atomically (a temporary file renamed over it),
-0644. A missing directory is created 0755; put the file in a directory
+0644. A missing directory is created 0755 (beneath a directory another
+uid can write, it keeps mkdir's mode and is never chmod'ed); put the file in a directory
 only container-init's user can write -- as root, container-init warns
 if another uid could replace it. Writing never holds up supervision or
 shutdown. The format and every field are in

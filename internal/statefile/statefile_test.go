@@ -77,12 +77,12 @@ func TestWriteDirectories(t *testing.T) {
 	defer syscall.Umask(old)
 	base := t.TempDir()
 	path := filepath.Join(base, "run", "kasm", "state.json")
-	created, err := Write(path, sample())
+	res, err := Write(path, sample())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(created) != 2 {
-		t.Errorf("created %v, want run and run/kasm", created)
+	if len(res.Created) != 2 || len(res.Unwidened) != 0 {
+		t.Errorf("created %v (unwidened %v), want run and run/kasm, both 0755", res.Created, res.Unwidened)
 	}
 	for _, d := range []string{filepath.Join(base, "run"), filepath.Join(base, "run", "kasm")} {
 		st, err := os.Stat(d)
@@ -97,8 +97,8 @@ func TestWriteDirectories(t *testing.T) {
 	if err := os.Mkdir(private, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if created, err := Write(filepath.Join(private, "state.json"), sample()); err != nil || len(created) != 0 {
-		t.Fatalf("Write into an existing directory: created %v, err %v", created, err)
+	if res, err := Write(filepath.Join(private, "state.json"), sample()); err != nil || len(res.Created) != 0 {
+		t.Fatalf("Write into an existing directory: created %v, err %v", res.Created, err)
 	}
 	if st, _ := os.Stat(private); st.Mode().Perm() != 0o700 {
 		t.Errorf("existing directory's mode changed to %04o", st.Mode().Perm())
@@ -145,5 +145,114 @@ func TestReadRejects(t *testing.T) {
 	}
 	if _, err := Read(filepath.Join(dir, "absent")); err == nil {
 		t.Error("Read of a missing file succeeded")
+	}
+}
+
+// A directory made beneath a parent another uid can write is never
+// chmod'ed: that uid could swap a directory of its own in between the
+// mkdir and the chmod. Here the swap happens at exactly that moment,
+// and the directory swapped in keeps its mode.
+func TestWriteNeverWidensAReplacedDirectory(t *testing.T) {
+	old := syscall.Umask(0o022)
+	defer syscall.Umask(old)
+	base := t.TempDir()
+	shared := filepath.Join(base, "shared")
+	if err := os.Mkdir(shared, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(shared, 0o777); err != nil { // writable by all, not sticky
+		t.Fatal(err)
+	}
+	victim := filepath.Join(base, "victim")
+	if err := os.Mkdir(victim, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	afterMkdir = func(parent, name string) {
+		made := filepath.Join(parent, name)
+		if err := os.Rename(made, made+".moved"); err != nil {
+			t.Error(err)
+		}
+		if err := os.Rename(victim, made); err != nil {
+			t.Error(err)
+		}
+	}
+	defer func() { afterMkdir = nil }()
+	res, err := Write(filepath.Join(shared, "run", "state.json"), sample())
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := os.Stat(filepath.Join(shared, "run"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode().Perm() != 0o700 {
+		t.Errorf("the directory swapped in was changed from 0700 to %04o", st.Mode().Perm())
+	}
+	if len(res.Unwidened) != 1 {
+		t.Errorf("unwidened = %v, want the directory made beneath the shared one", res.Unwidened)
+	}
+}
+
+// Beneath an untrusted parent a new directory gets mkdir's mode, the
+// umask applied; beneath a sticky one, which others cannot replace
+// entries in, it is set to exactly 0755.
+func TestWriteDirectoryModeByParent(t *testing.T) {
+	old := syscall.Umask(0o077)
+	defer syscall.Umask(old)
+	for _, tc := range []struct {
+		name      string
+		parent    os.FileMode
+		want      os.FileMode
+		unwidened int
+	}{
+		{"writable by all", 0o777, 0o700, 1},
+		{"sticky", 0o777 | os.ModeSticky, 0o755, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parent := filepath.Join(t.TempDir(), "p")
+			if err := os.Mkdir(parent, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(parent, tc.parent); err != nil {
+				t.Fatal(err)
+			}
+			res, err := Write(filepath.Join(parent, "run", "state.json"), sample())
+			if err != nil {
+				t.Fatal(err)
+			}
+			st, _ := os.Stat(filepath.Join(parent, "run"))
+			if st.Mode().Perm() != tc.want || len(res.Unwidened) != tc.unwidened {
+				t.Errorf("mode %04o unwidened %v, want %04o and %d", st.Mode().Perm(), res.Unwidened, tc.want, tc.unwidened)
+			}
+		})
+	}
+}
+
+// A close that fails, as a filesystem may report a failed write only
+// then, publishes nothing: the previous file stays, and no temporary
+// file is left.
+func TestWriteCloseFailureKeepsPreviousFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	if _, err := Write(path, sample()); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(path)
+	closeTemp = func(f *os.File) error {
+		f.Close()
+		return syscall.EIO
+	}
+	defer func() { closeTemp = (*os.File).Close }()
+	changed := sample()
+	changed.PID1.Version = "vchanged"
+	if _, err := Write(path, changed); err == nil {
+		t.Fatal("Write succeeded although closing the file failed")
+	}
+	if after, _ := os.ReadFile(path); string(after) != string(before) {
+		t.Error("the previous file was replaced")
+	}
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 1 {
+		t.Errorf("directory holds %d entries, want just the state file", len(entries))
 	}
 }

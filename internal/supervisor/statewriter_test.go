@@ -172,7 +172,7 @@ func TestStateFileStalledWriter(t *testing.T) {
 	u := shService("job.service", unit.TypeOneshot, "exit 0")
 	daemon := shService("daemon.service", unit.TypeSimple, "exec sleep 60")
 	sup := stateSupervisor(t, path, func(w *stateWriter) {
-		w.write = func(string, *statefile.File) ([]string, error) { <-stuck; return nil, nil }
+		w.write = func(string, *statefile.File) (statefile.Result, error) { <-stuck; return statefile.Result{}, nil }
 	}, u, daemon)
 	sup.SetStopTimeout(500 * time.Millisecond)
 	start := time.Now()
@@ -199,12 +199,12 @@ func TestStateFileWriteFailureLoggedOnce(t *testing.T) {
 	fails := 5
 	sup := stateSupervisor(t, path, func(w *stateWriter) {
 		w.tick = 20 * time.Millisecond
-		w.write = func(p string, f *statefile.File) ([]string, error) {
+		w.write = func(p string, f *statefile.File) (statefile.Result, error) {
 			mu.Lock()
 			defer mu.Unlock()
 			if fails > 0 {
 				fails--
-				return nil, errors.New("disk full")
+				return statefile.Result{}, errors.New("disk full")
 			}
 			return statefile.Write(p, f)
 		}
