@@ -17,7 +17,7 @@ import (
 // (OSLookup) reads container-init's own environment.
 type Lookup func(string) (string, bool)
 
-// OSLookup is the production Lookup -- reads from os.Environ().
+// OSLookup is the Lookup that reads container-init's own environment.
 func OSLookup(k string) (string, bool) { return os.LookupEnv(k) }
 
 // Options configures unit loading. Zero value is usable: defaults to
@@ -262,9 +262,9 @@ func (l *loader) warn(section, directive, msg string) {
 
 // applyDirective routes a single (section, name, value) tuple onto the
 // Unit. Unknown sections / directives produce a warning rather than an
-// error so the production unit set can layer on top of an older
-// container-init binary; strict mode (Options.Strict) promotes
-// warnings to errors at the LoadFile boundary.
+// error, so units written for a newer container-init still load; strict
+// mode (Options.Strict) promotes warnings to errors at the LoadFile
+// boundary.
 func (l *loader) applyDirective(u *Unit, section, name, value string) error {
 	switch section {
 	case "Unit":
@@ -352,8 +352,8 @@ const (
 
 // finishStartLimit fills the unset half of a start limit when the unit
 // set the other. A unit that sets neither has no limit: unlike systemd
-// there is no implicit default, so images that predate enforcement do
-// not start giving up on crash-looping services.
+// there is no implicit default, so a crash-looping service is limited
+// only when its unit asks.
 func (l *loader) finishStartLimit(u *Unit) {
 	if l.startLimitBurstSet && !l.startLimitIntervalSet {
 		u.StartLimitIntervalSec = defaultStartLimitInterval
@@ -581,10 +581,9 @@ func (l *loader) applyInstallSection(u *Unit, name, value string) error {
 	return nil
 }
 
-// splitWords splits on systemd whitespace. The gounit deserialiser
-// already handles line-continuations and surrounding quotes; what
-// reaches us is a single logical value that may still contain multiple
-// words separated by spaces.
+// splitWords splits a logical value on systemd whitespace; the gounit
+// deserialiser has already handled line continuations and surrounding
+// quotes.
 func splitWords(value string) []string {
 	return strings.Fields(value)
 }
@@ -593,7 +592,7 @@ func splitWords(value string) []string {
 // does: whitespace separates them, and "..." or '...' anywhere in a word
 // keep whitespace in it, so both "K=a b" and K="a b" are the one
 // assignment K=a b. Backslashes are kept as written: systemd's C-style
-// escapes are not interpreted, as they were not before quoting was.
+// escapes are not interpreted.
 func splitAssignments(value string) ([]string, error) {
 	var words []string
 	var cur strings.Builder
@@ -633,7 +632,7 @@ func splitAssignments(value string) ([]string, error) {
 
 // splitExec is the simple shell tokeniser for ExecStart=. Supports
 // double-quoted arguments containing spaces. Backslash escapes are
-// not interpreted; that's a Phase 4+ concern when the subset widens.
+// not interpreted.
 func splitExec(value string) ([]string, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {

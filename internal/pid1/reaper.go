@@ -22,8 +22,7 @@ type ExitStatus struct {
 }
 
 // AnyError returns nil for a clean (exit 0) termination and a
-// descriptive error otherwise. Maps directly onto the supervisor's
-// "failed?" check.
+// descriptive error otherwise.
 func (es ExitStatus) AnyError() error {
 	if es.Signaled {
 		return fmt.Errorf("killed by %v", es.Signal)
@@ -35,14 +34,11 @@ func (es ExitStatus) AnyError() error {
 }
 
 // Dispatcher owns SIGCHLD handling for container-init and routes
-// reaped exit statuses to per-pid channels. It replaces the original
-// cmd.Wait()-driven reaping (design note #1): a standalone
-// wait4(-1, …) reaper racing os/exec.Cmd.Wait silently steals child
-// statuses and breaks Restart=/OnFailure=. By making the dispatcher
-// the single source of truth for child reaping AND the supervisor's
-// fork-exec entry point (Spawn), we close that race AND collect any
-// orphaned grandchildren (dbus-launch double-forks, Type=forking
-// services) without affecting their tracked-child counterpart.
+// reaped exit statuses to per-pid channels. It is both the only reaper
+// and the only fork-exec entry point (Spawn): a second wait4(-1) or a
+// cmd.Wait elsewhere would race it for statuses. Orphaned grandchildren
+// (double-forking daemons, Type=forking services) are reaped too, and
+// dropped.
 type Dispatcher struct {
 	mu      sync.Mutex
 	pending map[int]chan ExitStatus
@@ -79,17 +75,15 @@ func (d *Dispatcher) Start(stop <-chan struct{}) {
 // Done returns a channel closed when the dispatcher's loop exits.
 func (d *Dispatcher) Done() <-chan struct{} { return d.done }
 
-// Spawn fork-execs cmd under the dispatcher lock so that SIGCHLD
-// delivery cannot race the pid-to-channel registration. Callers MUST
-// use this entry point rather than cmd.Start directly -- without
-// atomic registration, a fast-exiting child can deliver SIGCHLD
-// before the supervisor has filed its consumer channel, and the exit
-// status is silently dropped.
+// Spawn fork-execs cmd under the dispatcher lock, so the child's
+// channel is registered before any drain can reap it. Callers must
+// start children only through Spawn: with cmd.Start, a child that
+// exits at once can be reaped before its channel exists, and its
+// status is lost.
 //
-// After this returns, the os/exec.Process can be Released to free
-// Go's pidfd handle (Go's wait machinery is unused; we own the PID).
-// Callers signal the child via syscall.Kill on the returned PID, not
-// cmd.Process.Kill (which fails after Release sets Pid=-1).
+// After Spawn returns, the caller releases cmd.Process (Go's wait
+// machinery is unused) and signals the child with syscall.Kill on the
+// returned pid, not cmd.Process.Kill, which fails after Release.
 func (d *Dispatcher) Spawn(cmd *exec.Cmd) (int, <-chan ExitStatus, error) {
 	ch := make(chan ExitStatus, 1)
 	d.mu.Lock()
@@ -102,12 +96,9 @@ func (d *Dispatcher) Spawn(cmd *exec.Cmd) (int, <-chan ExitStatus, error) {
 	return pid, ch, nil
 }
 
-// Track is the lower-level entry point that registers a pid the
-// caller has already created (e.g. a grandchild discovered via
-// PIDFile=). The same race-window caveat applies as for Spawn -- the
-// caller must guarantee the PID hasn't been waited on by anyone else
-// since fork. Returns the channel that will receive the eventual
-// reap status.
+// Track registers a pid the caller did not start with Spawn and
+// returns the channel that receives its reap status. The caller must
+// guarantee the pid has not been reaped since it was created.
 func (d *Dispatcher) Track(pid int) <-chan ExitStatus {
 	ch := make(chan ExitStatus, 1)
 	d.mu.Lock()
@@ -116,9 +107,8 @@ func (d *Dispatcher) Track(pid int) <-chan ExitStatus {
 	return ch
 }
 
-// Untrack drops a registration without delivering. Used when the
-// supervisor decides a unit is being torn down and no longer cares
-// about the eventual exit.
+// Untrack drops pid's registration; its exit is then reaped and
+// dropped.
 func (d *Dispatcher) Untrack(pid int) {
 	d.mu.Lock()
 	delete(d.pending, pid)
@@ -132,8 +122,8 @@ func (d *Dispatcher) loop() {
 		d.drain()
 		select {
 		case <-d.stop:
-			// Final sweep so any zombie reaped after the loop body
-			// began still gets delivered.
+			// A final sweep delivers any exit that arrived since the
+			// last drain.
 			d.drain()
 			return
 		case <-d.notify:
@@ -187,9 +177,7 @@ func (d *Dispatcher) drain() {
 		}
 		ch, ok := d.pending[pid]
 		if !ok {
-			// Orphan -- re-parented grandchild, silently reaped. This
-			// is the path that catches dbus-launch's daemon child
-			// after the launcher exits.
+			// An orphan reparented onto PID 1: reaped and dropped.
 			continue
 		}
 		delete(d.pending, pid)
@@ -197,8 +185,7 @@ func (d *Dispatcher) drain() {
 		select {
 		case ch <- es:
 		default:
-			// Buffered to 1; the only way this fills is a programming
-			// error (double-track of the same pid). Log loudly.
+			// Buffered to 1: only a pid registered twice fills it.
 			log.Printf("pid1/dispatcher: dropped status for pid %d (channel full)", pid)
 		}
 	}
@@ -216,10 +203,8 @@ func buildExitStatus(pid int, ws syscall.WaitStatus) ExitStatus {
 	return es
 }
 
-// ForwardSignals runs until stop is closed, forwarding SIGTERM and
-// SIGINT to onShutdown. The supervisor is responsible for the actual
-// reverse-shutdown sequence; this routine just turns external signals
-// into a one-shot trigger.
+// ForwardSignals calls onShutdown once, with the first SIGTERM or
+// SIGINT received, and returns; or returns when stop is closed.
 func ForwardSignals(onShutdown func(os.Signal), stop <-chan struct{}) {
 	notify := make(chan os.Signal, 4)
 	signal.Notify(notify, syscall.SIGTERM, syscall.SIGINT)

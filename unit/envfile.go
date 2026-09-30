@@ -17,8 +17,7 @@ import (
 //     "\<newline>" into a continuation.
 //   - Lines that are empty or begin with '#' / ';' (after leading
 //     whitespace) are skipped.
-//   - Lines without '=' are skipped silently (systemd warns; we follow
-//     the laxer "skip" behaviour to match historical env-file users).
+//   - Lines without '=' are skipped silently, where systemd warns.
 //   - Keys must match [A-Za-z_][A-Za-z0-9_]*; otherwise the line is
 //     skipped.
 //   - Values are a sequence of unquoted, '...'-quoted, and "..."-quoted
@@ -26,15 +25,13 @@ import (
 //     whitespace is stripped from unquoted segments at the line level.
 //   - Inside '...' the value is literal -- no escape processing.
 //   - Inside "..." the recognised escapes are \" \\ \n \t \r \a \b \f
-//     \v \' \$ \space; everything else is preserved verbatim. systemd
-//     does NOT expand $VAR / ${VAR} inside double quotes, and neither
-//     do we -- that variable-expansion layer is the directive-value
-//     ${VAR}/${VAR:-default} substitution that already runs over the
-//     EnvironmentFile= path before we reach this function.
+//     \v \' \$ \space; everything else is preserved verbatim. As in
+//     systemd, $VAR / ${VAR} are not expanded; ${VAR} expansion
+//     applies only to directive values, such as the EnvironmentFile=
+//     path itself.
 //
-// Returns os.IsNotExist errors from Open verbatim so callers (the
-// supervisor, Phase 4.6) can choose whether to surface or swallow them
-// based on the EnvFileRef.IgnoreMissing flag.
+// An error from opening the file is returned verbatim, so callers can
+// honour EnvFileRef.IgnoreMissing with os.IsNotExist.
 func ParseEnvironmentFile(path string) ([]string, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -44,13 +41,11 @@ func ParseEnvironmentFile(path string) ([]string, error) {
 	return parseEnvFileReader(f)
 }
 
-// parseEnvFileReader is the file-shape-agnostic core of
-// ParseEnvironmentFile, factored out so tests + fuzz can drive it
-// without disk I/O.
+// parseEnvFileReader is ParseEnvironmentFile over any reader.
 func parseEnvFileReader(r io.Reader) ([]string, error) {
 	sc := bufio.NewScanner(r)
-	// 1 MiB max logical line; systemd's default is 32 KiB, but
-	// continuation lines can stack arbitrarily so we leave headroom.
+	// 1 MiB max logical line (systemd's is 32 KiB): continuation
+	// lines can stack arbitrarily.
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	var (
 		entries []string
@@ -63,9 +58,8 @@ func parseEnvFileReader(r io.Reader) ([]string, error) {
 			line = strings.TrimPrefix(line, "\ufeff")
 			firstLine = false
 		}
-		// Line continuation joins the next physical line. Done at the
-		// physical-line layer so it works regardless of whether the
-		// trailing "\" sits inside or outside quotes -- matches systemd.
+		// Line continuation joins the next physical line, whether the
+		// trailing "\" is inside or outside quotes, as in systemd.
 		if strings.HasSuffix(line, "\\") && !endsWithEscapedBackslash(line) {
 			joined.WriteString(line[:len(line)-1])
 			continue

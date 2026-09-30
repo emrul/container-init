@@ -140,9 +140,9 @@ func (t *Tracer) SetDeadline(d time.Time) {
 
 // Close stops accepting records and waits for the writer to flush
 // what is queued -- until the SetDeadline deadline, which may change
-// while it waits, or for CloseWait from the call when none is set. A writer that is still stuck then is abandoned:
-// Close returns anyway. Any number of calls, deferred or not, each
-// wait at most that long.
+// while it waits, or for CloseWait from the call when none is set. A
+// writer still stuck then is abandoned and Close returns anyway. Any
+// number of calls, deferred or not, each wait at most that long.
 func (t *Tracer) Close() {
 	if t == nil || t.disabled {
 		return
@@ -183,9 +183,8 @@ func (t *Tracer) Dropped() uint64 {
 	return t.dropped.Load()
 }
 
-// Phase is a begin/end pair -- the End call emits a record with
-// dt_ms = wallclock elapsed from Begin to End (matching the bash
-// trace_phase_begin / trace_phase_end semantics).
+// Phase is a begin/end pair: End emits a record with dt_ms, the
+// wall-clock time elapsed from Begin to End.
 type Phase struct {
 	tracer  *Tracer
 	name    string
@@ -231,8 +230,8 @@ func (p *Phase) endStatus(status string, fields map[string]any) {
 	p.tracer.emitRaw(rec)
 }
 
-// Event is a point event (dt_ms=0). Used for spawn/exit notifications
-// and other supervisor-internal milestones that don't have a "duration".
+// Event emits a point event (dt_ms=0), for milestones without a
+// duration such as spawns and exits.
 func (t *Tracer) Event(name string, fields map[string]any) {
 	if t == nil || t.disabled {
 		return
@@ -250,9 +249,9 @@ func (t *Tracer) Event(name string, fields map[string]any) {
 }
 
 // MemSnapshot reads cgroup + per-process accounting and emits one
-// record. Field names match the bash trace_mem_snapshot output exactly
-// so dashboards keyed off cgroup_current_bytes / by_comm[].rss_kib
-// work for both paths.
+// record. Field names match the bash trace_mem_snapshot output, so
+// dashboards keyed off cgroup_current_bytes / by_comm[].rss_kib read
+// either.
 func (t *Tracer) MemSnapshot(label string) {
 	if t == nil || t.disabled {
 		return
@@ -274,9 +273,8 @@ func (t *Tracer) MemSnapshot(label string) {
 	t.emitRaw(rec)
 }
 
-// ScheduleMemSnapshot emits a mem_snapshot after delay. Returns
-// immediately; the snapshot fires on its own goroutine. Mirrors the
-// bash trace_mem_steady_state_async helper.
+// ScheduleMemSnapshot emits a mem_snapshot after delay, from its own
+// goroutine; it returns immediately.
 func (t *Tracer) ScheduleMemSnapshot(label string, delay time.Duration) {
 	if t == nil || t.disabled {
 		return
@@ -323,9 +321,8 @@ func encode(rec map[string]any) ([]byte, error) {
 
 func nowMS() int64 { return time.Now().UnixNano() / int64(time.Millisecond) }
 
-// memSnap holds the raw figures collected by readMemSnapshot. We keep
-// it as an internal struct so the on-disk JSON shape lives in one
-// place (MemSnapshot above).
+// memSnap holds the raw figures collected by readMemSnapshot; the JSON
+// shape lives in one place, MemSnapshot.
 type memSnap struct {
 	cgroupCurrent any
 	cgroupPeak    any
@@ -335,9 +332,8 @@ type memSnap struct {
 	byComm        []map[string]any
 }
 
-// readMemSnapshot mirrors the bash trace_mem_snapshot reader. Falls
-// back to nil for any field it can't read so the JSON record's shape
-// stays stable.
+// readMemSnapshot reads the figures bash's trace_mem_snapshot reports.
+// A field it cannot read is nil, so the record's shape stays stable.
 func readMemSnapshot() memSnap {
 	s := memSnap{
 		cgroupCurrent: nil,
@@ -461,6 +457,5 @@ func (t *Tracer) Filename() string {
 	return t.path
 }
 
-// Goarch is exported for completeness so callers building cross-arch
-// integration tests don't need to import runtime themselves.
+// Goarch returns runtime.GOARCH, for cross-arch integration tests.
 func Goarch() string { return runtime.GOARCH }

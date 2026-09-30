@@ -13,9 +13,8 @@ import (
 // ordered: the ordering part of checkUnits, which New makes before
 // anything starts and Check makes for --validate.
 //
-// Before= is folded into the target's After= first, in place, so that
-// both topoSort and waitDeps honour it without either needing to know it
-// exists.
+// Before= is folded into the target's After= first, in place, so both
+// topoSort and waitDeps honour it through After= alone.
 func orderUnits(units []*unit.Unit) ([]*unit.Unit, error) {
 	resolveBefore(units)
 	return topoSort(units)
@@ -47,15 +46,13 @@ func checkUnits(units []*unit.Unit) ([]*unit.Unit, error) {
 
 // checkSharedSockets rejects a service that a native-mode socket
 // activates alongside any other socket. A native activation passes the
-// service only the listener that activated it, and runs under the
-// service's run lock; while it runs, another socket's activation waits
-// for the service to exit, so that socket's clients would queue,
-// unserved, for as long as the service lives -- possibly the whole
-// container. (systemd instead passes every socket of the service at
-// start.) Several proxy-mode sockets may share a service: a proxied
-// connection is served by whichever helper is running, without waiting
-// for the lock. A socket naming a service that is not loaded never
-// activates anything, so is not counted.
+// service only the listener that activated it and holds the service's
+// run lock while it runs, so another socket's activation would wait for
+// the service to exit and its clients would go unserved. (systemd
+// passes every socket of the service at start.) Several proxy-mode
+// sockets may share a service: a proxied connection is served by
+// whichever helper is running, without taking the lock. A socket naming
+// a service that is not loaded activates nothing and is not counted.
 func checkSharedSockets(units []*unit.Unit) error {
 	loaded := make(map[string]bool, len(units))
 	for _, u := range units {
@@ -97,16 +94,10 @@ func isNative(u *unit.Unit) bool { return u.ActivationMode == unit.ActivationNat
 // resolveBefore rewrites every "u Before= X" into the equivalent
 // "X After= u", in place, and must run before topoSort.
 //
-// Doing it as a rewrite rather than as extra edges inside topoSort is
-// deliberate. topoSort fixes only the order of the start *list*; what actually
-// blocks a unit at run time is waitDeps, which reads After=.
-// Teaching topoSort about Before= on its own would produce ordering that looks
-// right in the boot trace and still races in practice -- strictly worse than
-// not supporting the directive, because it would look supported.
-//
-// Before this existed, Before= parsed into the unit struct and was read
-// nowhere: accepted by --strict-units (it is a known directive, so no
-// unknown-directive warning), silently no-ordering at run time.
+// It is a rewrite rather than extra edges inside topoSort because
+// topoSort fixes only the order of the start list; what blocks a unit
+// at run time is waitDeps, which reads After=. Edges in topoSort alone
+// would order the list but not the starts.
 //
 // A Before= naming a unit that is not loaded is ignored, matching how
 // topoSort and waitDeps treat an unknown After= name.
@@ -140,11 +131,11 @@ func resolveBefore(units []*unit.Unit) {
 // plus the socket that activates it -- systemd's implicit ordering of a
 // .socket before its service, which holds whether or not the service
 // says After= itself. topoSort and shutdown both order by it, so a
-// socket configured After= its own service is a cycle for both, caught
-// before anything starts rather than stalling shutdown.
+// socket configured After= its own service is a cycle, rejected before
+// anything starts.
 //
-// waitDeps still reads After= alone: sockets are bound before any
-// service starts, so the implicit edge has nothing to wait for then.
+// waitDeps reads After= alone: sockets are bound before any service
+// starts, so the implicit edge has nothing to wait for.
 func orderedAfter(units []*unit.Unit) map[string][]string {
 	loaded := make(map[string]bool, len(units))
 	for _, u := range units {
@@ -172,8 +163,7 @@ func orderedAfter(units []*unit.Unit) map[string][]string {
 //
 // Requires= is a requirement, not an ordering: as in systemd, "A Requires=B"
 // without "A After=B" starts both in parallel, and "A Requires=B" with
-// "A Before=B" is valid and starts A first. Treating it as an edge made that
-// second case a cycle.
+// "A Before=B" is valid and starts A first.
 //
 // Before= does not contribute edges here: resolveBefore has already folded it
 // into the target's After=. The implicit socket-before-service ordering does

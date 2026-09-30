@@ -14,10 +14,9 @@ import (
 	"github.com/emrul/container-init/unit"
 )
 
-// A trace destination that stops accepting writes must not hold up
+// A trace destination that stops accepting writes does not hold up
 // shutdown: shutdown itself, and main's final flush after it (the
-// tracer's Close), return within the stop timeout -- not merely the
-// units' processes being stopped.
+// tracer's Close), return within the stop timeout.
 func TestShutdownReturnsWithBlockedTrace(t *testing.T) {
 	live := &unit.Unit{Name: "live-audit.service", Kind: unit.KindService, Type: unit.TypeSimple,
 		ExecStart: []string{"/bin/sleep", "60"}}

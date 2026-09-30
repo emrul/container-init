@@ -7,11 +7,11 @@
 // includes chdir(WorkingDirectory=) and the execve of ExecStart=, which
 // can block for as long as a hung FUSE or NFS mount likes.
 //
-// So the supervisor instead execs container-init's own binary
-// (/proc/self/exe) from "/", with this package's argument, and this
-// wrapper does the chdir and the final execve after the lock is
-// released. The only work left between fork and exec is kernel work on
-// objects PID 1 owns. The wrapper reports a failure on a status pipe
+// Instead the supervisor execs container-init's own binary
+// (/proc/self/exe) from "/", with this package's argument, and the
+// wrapper does the chdir and the final execve once the lock is
+// released. Between fork and exec only kernel work on objects PID 1
+// owns remains. The wrapper reports a failure on a status pipe
 // that the final execve closes (close-on-exec), so the supervisor can
 // tell "could not start" from the service's own exit status.
 package execwrap
@@ -45,9 +45,8 @@ func Argv(statusFD int, dir, path string, argv []string) []string {
 	return append([]string{"container-init", Arg, strconv.Itoa(statusFD), dir, path, "--"}, argv...)
 }
 
-// Main runs the wrapper and does not return when os.Args[1] is Arg or
-// ProbeArg.
-// Otherwise it returns at once. Call it first thing in main, and in
+// Main runs the wrapper, and does not return, when os.Args[1] is Arg or
+// ProbeArg; otherwise it returns at once. Call it first thing in main, and in
 // TestMain of any package whose tests spawn services.
 func Main() {
 	if len(os.Args) >= 2 && os.Args[1] == ProbeArg {

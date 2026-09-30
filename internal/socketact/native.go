@@ -8,12 +8,10 @@ import (
 
 // PrepareNative configures cmd to be exec'd with b.File inherited as
 // fd 3, plus the sd_listen_fds env (LISTEN_FDS, LISTEN_PID,
-// LISTEN_FDNAMES). LISTEN_PID must equal the consumer's getpid() at
-// the moment it reads the env, which we cannot know before exec; the
-// portable fix is to wrap the original argv in `sh -c 'export
-// LISTEN_PID=$$; exec <argv>'` so the assignment fires inside the
-// final process image. The shim is two extra syscalls (fork+exec) on
-// the activation path, which is dwarfed by helper cold-start.
+// LISTEN_FDNAMES). LISTEN_PID must equal the consumer's getpid() when
+// it reads the env, which is not known before exec, so argv is wrapped
+// in `sh -c 'export LISTEN_PID=$$; exec <argv>'` and the assignment
+// happens inside the final process image.
 //
 // The bound listener stays open in container-init so the same fd can
 // be re-passed across service restarts.
@@ -38,8 +36,8 @@ func PrepareNative(cmd *exec.Cmd, b *Bound) error {
 	return nil
 }
 
-// stripListenEnv removes any LISTEN_* entry so we re-add a single
-// canonical pair without duplicates.
+// stripListenEnv removes every LISTEN_* entry, so exactly one of each
+// is added back.
 func stripListenEnv(env []string) []string {
 	out := make([]string, 0, len(env))
 	for _, e := range env {
@@ -52,8 +50,8 @@ func stripListenEnv(env []string) []string {
 }
 
 // shellQuoteArgv renders argv as a single sh-safe command line.
-// Single-quoting is sufficient for our use; embedded single quotes
-// aren't supported (we don't expect them in production unit values).
+// Arguments are single-quoted; embedded single quotes are not
+// supported.
 func shellQuoteArgv(argv []string) string {
 	var b strings.Builder
 	for i, a := range argv {

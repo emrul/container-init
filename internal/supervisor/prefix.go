@@ -12,12 +12,10 @@ import (
 // partial line (no trailing '\n') is buffered until the rest arrives,
 // so prefixes are never injected mid-line.
 //
-// Concurrency: exec.Cmd starts independent io.Copy goroutines for
-// stdout and stderr; the mutex keeps each write atomic at line
-// granularity so concurrent stdout/stderr writes don't interleave
-// inside a single line. Cross-unit interleaving is unchanged -- the
-// kernel guarantees atomicity for writes ≤ PIPE_BUF (4096) on the
-// pipe to journald, and our per-line writes are well under that.
+// Concurrency: exec.Cmd copies stdout and stderr on separate
+// goroutines; the mutex keeps them from interleaving within a line.
+// Lines from different units interleave only at line boundaries: each
+// line is one write, and pipe writes up to PIPE_BUF are atomic.
 type linePrefixWriter struct {
 	prefix []byte
 	w      io.Writer

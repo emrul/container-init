@@ -1,9 +1,7 @@
 // Package userdb resolves User= / Group= directive values to numeric
 // uid/gid plus supplementary group lists by reading /etc/passwd and
-// /etc/group directly. We do not shell out to id(1) / getent(1) -- the
-// extra fork-exec is gratuitous when /etc/passwd is a few KiB of text
-// and we already need to handle the lookup synchronously inside the
-// supervisor's pre-exec path.
+// /etc/group directly, without shelling out to id(1) or getent(1): the
+// lookup runs synchronously on the supervisor's pre-exec path.
 //
 // Both spellings (numeric "1500" and named "alice") are accepted. A
 // numeric form skips the file lookup; a named form must resolve.
@@ -34,8 +32,8 @@ const (
 	GroupFileEnv  = "CONTAINER_INIT_GROUP_FILE"
 )
 
-// Default file paths, as package-level vars so unit tests can redirect
-// lookups to fixture files. The environment overrides them.
+// Default file paths; vars so tests can redirect lookups to fixtures.
+// The environment overrides them.
 var (
 	passwdPathOverride = "/etc/passwd"
 	groupPathOverride  = "/etc/group"
@@ -60,7 +58,7 @@ var (
 	groupSource  = &source{env: GroupFileEnv, def: &groupPathOverride}
 )
 
-// open opens the file lookups read now.
+// open opens the file the next lookup reads.
 func (s *source) open() (*os.File, error) {
 	p := os.Getenv(s.env)
 	if p == "" {
@@ -121,9 +119,9 @@ func Resolve(user, group, homeOverride string) (Identity, error) {
 			id.GID = e.gid
 			id.Home = e.home
 		} else {
-			// Numeric uid, no /etc/passwd entry -- accept and continue
-			// with synthetic name; supplementary group lookup needs
-			// a username so leave SupplementaryGroups empty.
+			// A numeric uid with no passwd entry is accepted under a
+			// synthetic name, with no supplementary groups (their
+			// lookup needs a username).
 			id.Username = user
 		}
 	} else {

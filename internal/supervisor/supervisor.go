@@ -124,8 +124,7 @@ type serviceState struct {
 // New constructs a supervisor for the given units. The dispatcher
 // must be Started by the caller before Run is invoked. Pass nil for
 // tracer to disable tracing. Pass nil for cg to disable cgroup-v2
-// integration; the supervisor falls back to the legacy SIGTERM-only
-// PGID path in that case.
+// integration; units are then stopped by process group.
 func New(units []*unit.Unit, tracer *trace.Tracer, dispatcher *pid1.Dispatcher, cg *cgroup.Manager) (*Supervisor, error) {
 	if dispatcher == nil {
 		return nil, fmt.Errorf("supervisor: dispatcher is required")
@@ -373,11 +372,8 @@ func (s *Supervisor) Run() int {
 		go s.runService(u)
 	}
 
-	// Boot-trace landmarks. post_services fires after the eager-spawn
-	// pass dispatches every long-running goroutine (mirrors the bash
-	// trace's services_invoke completion). steady_state_t+20s mirrors
-	// the bash trace_mem_steady_state_async helper, capturing memory
-	// after the XFCE applet wake-up settles.
+	// Boot-trace landmarks: post_services once every eagerly started
+	// unit has been dispatched, and a steady-state snapshot 20s later.
 	if s.tracer != nil {
 		s.tracer.MemSnapshot("post_services")
 		s.tracer.ScheduleMemSnapshot("steady_state_t+20s", 20*time.Second)
@@ -468,11 +464,8 @@ func (s *Supervisor) runService(u *unit.Unit) {
 	release := s.claim(u)
 	defer release()
 	first := true
-	// Type=simple/forking: signal ready post-fork (the service is
-	// "started"; long-running, never exits cleanly). The hook fires
-	// inside spawnAndWait between Spawn returning and Wait blocking,
-	// so a service like /bin/sleep 3600 unblocks its dependents
-	// immediately rather than after sleep exits.
+	// Type=simple/forking is ready once its ExecStart has been exec'd,
+	// not when it exits, so its dependents start alongside it.
 	var onSpawned func()
 	if u.Type != unit.TypeOneshot {
 		onSpawned = func() {
@@ -665,13 +658,9 @@ func (s *Supervisor) spawnAndWait(u *unit.Unit, extra *socketact.Bound, onSpawne
 		}
 		cmd.Env = append(cmd.Env, entries...)
 	}
-	// Per-unit log tagging. exec.Cmd's internal io.Copy goroutines
-	// drain the child's stdout/stderr into these writers, which inject
-	// "[unit] " in front of every newline-terminated line. The
-	// goroutines exit when the child closes the pipes (i.e. on exit),
-	// so we don't need to call cmd.Wait -- the pid1 dispatcher still
-	// owns reaping. Mimics journald's _SYSTEMD_UNIT= grouping for
-	// people grepping the container log.
+	// Every output line is prefixed "[unit] ". exec.Cmd's copy
+	// goroutines end when the child closes its pipes, so cmd.Wait is
+	// not needed; the dispatcher owns reaping.
 	prefix := "[" + unitLabel(u.Name) + "] "
 	cmd.Stdout = newLinePrefixWriter(prefix, os.Stdout)
 	cmd.Stderr = newLinePrefixWriter(prefix, os.Stderr)
@@ -707,13 +696,9 @@ func (s *Supervisor) spawnAndWait(u *unit.Unit, extra *socketact.Bound, onSpawne
 		if switchID {
 			applyCredential(cmd.SysProcAttr, id.UID, id.GID, id.SupplementaryGroups)
 		}
-		// Replace HOME / USER / LOGNAME with the resolved identity's
-		// values. This wins over both the inherited container-init
-		// environment AND any matching key in u.Environment from the
-		// unit file -- User= is the source of truth for who the
-		// process is, so its environment should match. If a unit
-		// genuinely needs a divergent HOME (rare), it should set
-		// WorkingDirectory and the script can compute its own.
+		// HOME / USER / LOGNAME follow the resolved identity, over
+		// both the inherited environment and the unit's own
+		// Environment=: User= decides who the process is.
 		cmd.Env = setEnv(cmd.Env, "HOME", id.Home)
 		cmd.Env = setEnv(cmd.Env, "USER", id.Username)
 		cmd.Env = setEnv(cmd.Env, "LOGNAME", id.Username)
@@ -781,10 +766,9 @@ func (s *Supervisor) spawnAndWait(u *unit.Unit, extra *socketact.Bound, onSpawne
 		invokePhase.EndStatus("error", map[string]any{"unit": u.Name, "err": err.Error()})
 		return s.startFailed(u, err)
 	}
-	// Fallback when the child could not be spawned into its cgroup:
-	// migrate it now. Future fork(2)s inherit the cgroup, but anything
-	// the child forked before this Place lands stays in container-init's
-	// cgroup, out of reach of cgroup.kill.
+	// A child not spawned into its cgroup is moved there now. Anything
+	// it forked before the move stays in container-init's cgroup, out
+	// of reach of cgroup.kill.
 	inCgroup := placed
 	if s.cgroup.Available() && !placed {
 		if err := s.cgroup.Place(u.Name, pid); err != nil {
@@ -793,11 +777,9 @@ func (s *Supervisor) spawnAndWait(u *unit.Unit, extra *socketact.Bound, onSpawne
 			inCgroup = true
 		}
 	}
-	// Release Go's pidfd handle / process state. We own this PID via
-	// the dispatcher; cmd.Wait would race the dispatcher's wait4 and
-	// is never called. After Release, cmd.Process.Pid==-1, so
-	// signalling MUST go through syscall.Kill on the captured pid
-	// rather than cmd.Process.Kill.
+	// The dispatcher reaps this pid, so cmd.Wait is never called.
+	// After Release, cmd.Process.Pid is -1: signal the captured pid
+	// with syscall.Kill.
 	_ = cmd.Process.Release()
 
 	state := &serviceState{name: u.Name, pid: pid, startedAt: time.Now(), inCgroup: inCgroup}
@@ -867,10 +849,8 @@ func (s *Supervisor) finish(u *unit.Unit, state *serviceState, es pid1.ExitStatu
 	}
 	s.mu.Unlock()
 	s.stateChanged()
-	// Best-effort orphan cleanup. With the process in its cgroup we own
-	// an atomic "kill everything in this cgroup" lever and use it; on
-	// restart the cgroup will be re-populated cleanly by the next
-	// spawn. Otherwise we fall back to a SIGTERM-only PGID nudge (PID
+	// Best-effort orphan cleanup: cgroup.kill when the process is in
+	// its cgroup, otherwise SIGTERM to its process group only (PID
 	// reuse rules out a delayed SIGKILL).
 	if !state.inCgroup || s.cgroup.Kill(u.Name) != nil {
 		_ = killGroup(state.pid, syscall.SIGTERM)
@@ -1010,10 +990,9 @@ func (s *Supervisor) driveNative(sock *unit.Unit, bound *socketact.Bound) {
 		}
 		end := endIdle
 		if first {
-			// Honour the helper service's After= before its first
-			// spawn -- the socket has been listening since Pass 1, so a
-			// client may have queued bytes already; we still don't exec
-			// the helper until prerequisite oneshot units have completed.
+			// The socket listens from Pass 1, so a client may be
+			// queued already; the service still waits for its After=
+			// before its first spawn.
 			if dep, ok := s.waitDeps(svc); !ok {
 				if dep == "" {
 					return
@@ -1437,8 +1416,8 @@ func (s *Supervisor) closeSocket(name string) {
 // whether it had to be killed.
 func (s *Supervisor) stopUnit(u *unit.Unit, deadline time.Time) (forced bool) {
 	// Whatever happens below, the unit ends stopped for the final
-	// report -- including a start admitted but not spawned (blocked
-	// reading an EnvironmentFile=, say), which the gate now refuses.
+	// report, including a start admitted but not yet spawned, which
+	// the spawn gate refuses.
 	defer s.recordStopped(u.Name)
 	s.mu.Lock()
 	st := s.services[u.Name]
@@ -1483,9 +1462,8 @@ func (s *Supervisor) stopUnit(u *unit.Unit, deadline time.Time) (forced bool) {
 		}
 	}
 	if s.cgroup.Available() {
-		// Even on graceful exit, sweep the cgroup so leftover orphans
-		// (dbus-daemon etc.) don't outlive the container's reverse
-		// shutdown.
+		// Sweep the cgroup even after a graceful exit, so no orphan
+		// outlives reverse shutdown.
 		_ = s.cgroup.Kill(u.Name)
 		_ = s.cgroup.Remove(u.Name)
 	}
@@ -1604,10 +1582,7 @@ func errString(err error) string {
 
 // setEnv sets key to value in env, removing every other entry for key:
 // the child's environment is deduplicated with the last entry winning,
-// so replacing only the first would lose to a later duplicate. Used to
-// overwrite HOME / USER / LOGNAME on privilege drop so the dropped-priv
-// child sees the resolved identity, not whatever container-init
-// inherited as PID 1 or the unit set.
+// so replacing only the first would lose to a later duplicate.
 func setEnv(env []string, key, value string) []string {
 	prefix := key + "="
 	env = slices.DeleteFunc(env, func(e string) bool { return strings.HasPrefix(e, prefix) })

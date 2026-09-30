@@ -14,9 +14,9 @@ import (
 	"github.com/emrul/container-init/unit"
 )
 
-// Bound holds the OS-level listener for a single .socket unit, kept
-// alive in container-init for the lifetime of the container so it can
-// be re-passed across service restarts.
+// Bound holds the OS-level listener for a single .socket unit. It stays
+// open in container-init for the life of the container, so the same fd
+// is passed to every run of the service.
 type Bound struct {
 	Listener unit.Listener
 	File     *os.File // owns the bound fd; closed on shutdown or when the socket fails
@@ -67,11 +67,10 @@ func Bind(l unit.Listener, p Perm) (*Bound, error) {
 // bindUnix binds l's socket in a private staging directory beside its
 // path, sets the owner and mode p asks for, and only then renames it
 // into place. The public path never exists with any other permissions,
-// so no client can connect before they apply (a bind-then-chmod would
-// leave the umask's mode reachable meanwhile). The staging directory
-// is on the same filesystem, so the rename is atomic; it also replaces
-// a stale socket left by a previous run. On any failure nothing is
-// left at either path.
+// so no client can connect before they apply. The staging directory is
+// on the same filesystem, so the rename is atomic; it also replaces a
+// stale socket left by a previous run. On any failure nothing is left
+// at either path.
 func bindUnix(l unit.Listener, p Perm) (*Bound, error) {
 	dst := l.Address
 	fail := func(err error) (*Bound, error) {
@@ -225,11 +224,11 @@ func (b *Bound) pollOnce() (bool, error) {
 	return n > 0 && fds[0].Revents != 0, nil
 }
 
-// Accept returns the next connection on the bound listener. Used by
-// proxy mode and by the activation waiter to detect first-connect.
+// Accept returns the next connection on the bound listener (proxy
+// mode).
 func (b *Bound) Accept() (net.Conn, error) {
 	return b.listener.Accept()
 }
 
-// Listener returns the underlying net.Listener (for proxy mode).
+// Net returns the underlying net.Listener (proxy mode).
 func (b *Bound) Net() net.Listener { return b.listener }

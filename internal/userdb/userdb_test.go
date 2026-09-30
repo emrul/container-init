@@ -84,8 +84,8 @@ func TestResolveExplicitGroupOverride(t *testing.T) {
 	if got.GID != 29 {
 		t.Errorf("GID = %d, want 29 (audio)", got.GID)
 	}
-	// audio is now primary, video stays supplementary; alice (1500) drops
-	// out because it's no longer the primary.
+	// With audio as the primary group, video stays supplementary and
+	// alice's passwd group (1500) is not listed.
 	want := []uint32{44}
 	if !reflect.DeepEqual(got.SupplementaryGroups, want) {
 		t.Errorf("supplementary = %v, want %v", got.SupplementaryGroups, want)

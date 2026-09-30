@@ -44,8 +44,7 @@ func indexOf(t *testing.T, names []string, want string) int {
 }
 
 func TestBeforeOrdersTheStartList(t *testing.T) {
-	// The regression this exists for: Before= parsed into the unit and was
-	// read nowhere, so it ordered nothing while looking like it did.
+	// Before= orders the start list, not only the parsed unit.
 	names := order(t, units(
 		u("app.service"),
 		before("accessibility.service", "app.service"),
@@ -140,8 +139,8 @@ func TestBeforeComposesWithAfter(t *testing.T) {
 
 func TestRequiresIsNotAnOrdering(t *testing.T) {
 	// "a Requires= b" plus "a Before= b" is valid in systemd: b needs a
-	// pulled in, and a must be up first. With Requires= counted as an
-	// edge it was a cycle and the whole unit set was rejected.
+	// pulled in, and a must be up first. Requires= adds no ordering
+	// edge, so this is not a cycle.
 	a := &unit.Unit{Name: "a.service", Requires: []string{"b.service"}, Before: []string{"b.service"}}
 	names := order(t, units(a, u("b.service")))
 	if indexOf(t, names, "a.service") > indexOf(t, names, "b.service") {

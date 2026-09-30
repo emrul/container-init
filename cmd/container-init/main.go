@@ -99,9 +99,9 @@ func main() {
 			fmt.Fprintf(os.Stderr, "container-init: validate: %v\n", err)
 			exitWith(64)
 		}
-		// Strict mode already exits non-zero above on any warning; in
-		// non-strict mode we still want a non-zero exit if any warning
-		// was raised, so build pipelines catch directive drift.
+		// Strict mode has already failed on any warning; otherwise a
+		// warning still exits non-zero, so build pipelines catch
+		// directive drift.
 		if len(warnings) > 0 {
 			exitWith(1)
 		}
@@ -131,9 +131,9 @@ func main() {
 	sup.SetStateFile(*stateFile, version)
 
 	// Compatibility shim for clients that probe systemd by spawning
-	// systemd-run (notably Ptyxis). Off by default; opt-in via flag.
-	// os.Exit at the bottom of main doesn't run defers, so the shim
-	// is closed explicitly after sup.Run() returns.
+	// systemd-run (notably Ptyxis); off unless the flag is given.
+	// os.Exit runs no defers, so the shim is closed explicitly after
+	// sup.Run() returns.
 	var shim *systemd1shim.Shim
 	if *systemd1Shim != "" {
 		addrs := strings.Split(*systemd1Shim, ",")

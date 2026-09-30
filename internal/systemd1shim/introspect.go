@@ -5,10 +5,9 @@ package systemd1shim
 // systemd-run (and Ptyxis's `--scope` wrapper) walk to validate that
 // they're talking to the right thing before issuing StartTransientUnit.
 //
-// We don't claim to implement properties, the per-unit interface, or
-// anything else real systemd exposes; clients that consult those will
-// either fall back gracefully or fail loudly, which is the right
-// failure mode for a stub.
+// It describes only the Manager object; clients that introspect for
+// anything else real systemd exposes either fall back or fail loudly,
+// which is the right failure mode for a stub.
 const managerIntrospectXML = `<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
  "http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
 <node>

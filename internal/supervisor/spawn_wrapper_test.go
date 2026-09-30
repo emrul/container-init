@@ -75,8 +75,8 @@ func TestWorkingDirectoryIsEnteredByTheWrapper(t *testing.T) {
 }
 
 // TestStartFailuresReportedByTheWrapper: a missing WorkingDirectory=
-// or ExecStart= binary is a start failure, as before the wrapper, not
-// an ordinary non-zero exit.
+// or ExecStart= binary is a start failure, not an ordinary non-zero
+// exit.
 func TestStartFailuresReportedByTheWrapper(t *testing.T) {
 	dir := t.TempDir()
 	badDir := &unit.Unit{

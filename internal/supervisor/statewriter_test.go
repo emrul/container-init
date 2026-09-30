@@ -52,7 +52,7 @@ func run(t *testing.T, sup *Supervisor) (stop func()) {
 	return stop
 }
 
-// waitFile waits until the state file at path satisfies ok.
+// waitStateFile waits until the state file at path satisfies ok.
 func waitStateFile(t *testing.T, path, what string, ok func(*statefile.File) bool) *statefile.File {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)

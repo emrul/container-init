@@ -150,8 +150,7 @@ func (m *manager) Unsubscribe() *dbus.Error { return nil }
 func (m *manager) Reload() *dbus.Error      { return nil }
 func (m *manager) Reexecute() *dbus.Error   { return nil }
 
-// uint32ToA renders a uint32 without importing strconv (kept to avoid
-// pulling strconv into a hot path; the values are small).
+// uint32ToA renders a uint32 in decimal.
 func uint32ToA(v uint32) string {
 	if v == 0 {
 		return "0"

@@ -1,18 +1,17 @@
 // Package cgroup wraps the cgroup-v2 subset container-init relies on
-// for atomic process-tree teardown. Closes the original design surprise
-// #3 (Linux PID/PGID reuse defeats delayed kill -PGID): a per-unit
-// cgroup is identity-bound, so writing 1 to cgroup.kill atomically
-// SIGKILLs every member regardless of PID reuse races.
+// for atomic process-tree teardown. A per-unit cgroup is bound to its
+// processes, not their ids, so writing 1 to cgroup.kill SIGKILLs every
+// member atomically, immune to the PID reuse that makes a delayed
+// kill(-pgid) unsafe.
 //
-// Layout: container-init mkdirs <our-cgroup>/container-init/<unit>/
-// once per unit, and the supervisor spawns the unit's process directly
-// into it (clone3 with CLONE_INTO_CGROUP; Place is the fallback for
-// kernels without it), so its descendants inherit the cgroup. On
-// shutdown it writes 1 to cgroup.kill to take everything out atomically.
+// Layout: <our-cgroup>/container-init/<unit>/, made once per unit. The
+// supervisor spawns the unit's process directly into it (clone3 with
+// CLONE_INTO_CGROUP; Place is the fallback for kernels without it), so
+// its descendants inherit the cgroup.
 //
-// Falls back to a no-op manager when cgroup-v2 is not mounted or not
-// writable here -- the supervisor then relies on the legacy SIGTERM
-// path. Detection is best-effort and recorded in Err() for trace.
+// When cgroup-v2 is not mounted or not writable, the Manager is a
+// no-op and the supervisor kills by process group instead; Err() says
+// why.
 package cgroup
 
 import (
@@ -25,8 +24,7 @@ import (
 )
 
 const (
-	// cgroupRoot is the cgroup-v2 unified-hierarchy mountpoint on
-	// every distro in the Phase 1 matrix.
+	// cgroupRoot is the cgroup-v2 unified-hierarchy mountpoint.
 	cgroupRoot = "/sys/fs/cgroup"
 	procFile   = "/proc/self/cgroup"
 	// initSub is the per-instance subdirectory we own under the
@@ -34,9 +32,8 @@ const (
 	initSub = "container-init"
 )
 
-// Manager owns the per-unit cgroup directories. Always returns a
-// non-nil instance; check Available() before relying on Mkdir / Place
-// / Kill to do real work.
+// Manager owns the per-unit cgroup directories. Check Available()
+// before relying on Mkdir / Place / Kill to do real work.
 type Manager struct {
 	available bool
 	base      string
@@ -46,9 +43,8 @@ type Manager struct {
 	units map[string]string // unit name -> absolute cgroup path
 }
 
-// New initialises the manager. A nil error from this constructor is
-// not the success signal -- call Available() / Err() after to learn
-// whether cgroup-v2 is reachable here.
+// New initialises the manager; it is never nil. Available() and Err()
+// say whether cgroup-v2 is usable here.
 func New() *Manager {
 	m := &Manager{units: make(map[string]string)}
 	base, err := detect()
@@ -74,9 +70,9 @@ func (m *Manager) Err() error { return m.err }
 // created (empty string when !Available).
 func (m *Manager) Base() string { return m.base }
 
-// Mkdir creates (idempotently) the per-unit cgroup directory and
-// returns its absolute path. Safe to call before every spawn --
-// subsequent calls just look up the existing entry.
+// Mkdir creates the per-unit cgroup directory, if it does not exist
+// yet, and returns its absolute path. It is idempotent, so it is
+// called before every spawn.
 func (m *Manager) Mkdir(unit string) (string, error) {
 	if !m.available {
 		return "", errors.New("cgroup: not available")
@@ -95,9 +91,8 @@ func (m *Manager) Mkdir(unit string) (string, error) {
 }
 
 // Place migrates pid into unit's cgroup by writing to cgroup.procs.
-// Subsequent fork(2)s by the placed process inherit the cgroup
-// automatically -- so any double-fork descendants land in the same
-// killable group.
+// Processes it forks from then on inherit the cgroup; any it forked
+// before stay where they are.
 func (m *Manager) Place(unit string, pid int) error {
 	if !m.available {
 		return errors.New("cgroup: not available")
@@ -112,8 +107,7 @@ func (m *Manager) Place(unit string, pid int) error {
 }
 
 // Kill writes 1 to cgroup.kill, atomically SIGKILLing every process
-// currently in the cgroup. Available since kernel 5.14 (predates the
-// Phase 1 matrix's oldest base, Ubuntu Jammy 22.04 kernel 5.15).
+// currently in the cgroup. cgroup.kill needs kernel 5.14 or later.
 func (m *Manager) Kill(unit string) error {
 	if !m.available {
 		return errors.New("cgroup: not available")
@@ -127,9 +121,8 @@ func (m *Manager) Kill(unit string) error {
 	return os.WriteFile(filepath.Join(p, "cgroup.kill"), []byte("1"), 0o644)
 }
 
-// HasMembers returns true when unit's cgroup currently has at least
-// one process in it. Used by shutdown to decide whether to fire
-// cgroup.kill.
+// HasMembers reports whether unit's cgroup has at least one process
+// in it.
 func (m *Manager) HasMembers(unit string) bool {
 	if !m.available {
 		return false
@@ -147,10 +140,9 @@ func (m *Manager) HasMembers(unit string) bool {
 	return len(strings.TrimSpace(string(data))) > 0
 }
 
-// Remove deletes the per-unit cgroup directory. Safe even when the
-// cgroup is non-empty -- rmdir(2) on a non-empty cgroup-v2 directory
-// returns EBUSY which we surface so the caller can retry after
-// Kill+drain.
+// Remove deletes the per-unit cgroup directory. On a cgroup that
+// still has members rmdir(2) fails with EBUSY, which is returned so
+// the caller can retry after Kill.
 func (m *Manager) Remove(unit string) error {
 	if !m.available {
 		return nil
@@ -165,10 +157,9 @@ func (m *Manager) Remove(unit string) error {
 	return os.Remove(p)
 }
 
-// detect locates the writable cgroup-v2 dir for container-init's own
-// cgroup and creates the container-init/ subdirectory under it.
-// Failure here means cgroup-v2 isn't usable -- the caller falls back
-// to the legacy PGID path.
+// detect locates container-init's own cgroup-v2 directory and creates
+// the container-init/ subdirectory under it. An error means cgroup-v2
+// is not usable here.
 func detect() (string, error) {
 	if _, err := os.Stat(filepath.Join(cgroupRoot, "cgroup.controllers")); err != nil {
 		return "", fmt.Errorf("cgroup-v2 not mounted at %s: %w", cgroupRoot, err)
@@ -195,7 +186,6 @@ func detect() (string, error) {
 	return base, nil
 }
 
-// sanitize keeps unit-name → directory-name a 1:1 mapping today
-// (".service" / ".socket" suffixes are filesystem-safe). Reserved as
-// the future-proofing seam for any drop-in name that needs escaping.
+// sanitize maps a unit name to its cgroup directory name. Unit names
+// are already filesystem-safe, so the mapping is the identity.
 func sanitize(name string) string { return name }

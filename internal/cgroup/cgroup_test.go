@@ -80,7 +80,7 @@ func TestManagerNoopWhenUnavailable(t *testing.T) {
 	}
 }
 
-// TestSanitizePassesThrough pins today's behaviour -- unit names round-trip.
+// TestSanitizePassesThrough: unit names are used unchanged.
 func TestSanitizePassesThrough(t *testing.T) {
 	for _, name := range []string{"foo.service", "web.service", "audio-out-ws.socket"} {
 		got := sanitize(name)

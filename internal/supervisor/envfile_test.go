@@ -14,18 +14,16 @@ import (
 	"github.com/emrul/container-init/unit"
 )
 
-// TestEnvironmentFileLoaded writes a key=value file, points a unit at
-// it, and verifies the value reaches the child's environment. Without
-// EnvironmentFile= support in the supervisor (the gap this test
-// guards), the child sees the var unset and writes the literal "MISS"
-// instead of the expected value.
+// TestEnvironmentFileLoaded: a value from EnvironmentFile= reaches the
+// child's environment. The child writes the literal "MISS" when the
+// variable is unset.
 func TestEnvironmentFileLoaded(t *testing.T) {
 	dir := t.TempDir()
 	envFile := filepath.Join(dir, "kasm-dbus.env")
 	out := filepath.Join(dir, "out")
 	// Single-quoted value, matching dbus-launch --sh-syntax. The
 	// parser handles double-quoted, single-quoted, and unquoted; this
-	// is the form Kasm's /tmp/kasm-dbus.env actually uses.
+	// is the form Kasm's /tmp/kasm-dbus.env uses.
 	envContent := "DBUS_SESSION_BUS_ADDRESS='unix:path=/tmp/dbus-test,guid=deadbeef'\nUNRELATED=ok\n"
 	if err := os.WriteFile(envFile, []byte(envContent), 0o644); err != nil {
 		t.Fatal(err)

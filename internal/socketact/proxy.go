@@ -8,13 +8,11 @@ import (
 	"time"
 )
 
-// Proxy copies bytes between an accepted public connection and the
-// helper's private endpoint. ProxyTo dials target with retries (the
-// helper may still be cold-starting), then runs two io.Copy goroutines
-// until either side closes.
-//
-// Returns when both halves have finished. Caller is responsible for
-// closing the public conn.
+// ProxyTo copies bytes between an accepted public connection and the
+// helper's private endpoint. It dials target with retries (the helper
+// may still be cold-starting), then copies in both directions until
+// either side closes, and returns when both halves have finished. The
+// caller closes public.
 func ProxyTo(public net.Conn, network, target string, dialTimeout, totalTimeout time.Duration) error {
 	private, err := dialWithRetry(network, target, dialTimeout, totalTimeout)
 	if err != nil {
@@ -47,8 +45,8 @@ type closeWriter interface{ CloseWrite() error }
 
 // dialWithRetry retries until the helper's private endpoint becomes
 // reachable or totalTimeout elapses. Backoff starts at 25ms and caps
-// at 200ms -- short because the helper is local and we want first-byte
-// latency low.
+// at 200ms, short because the helper is local and first-byte latency
+// matters.
 func dialWithRetry(network, target string, dialTimeout, totalTimeout time.Duration) (net.Conn, error) {
 	deadline := time.Now().Add(totalTimeout)
 	backoff := 25 * time.Millisecond

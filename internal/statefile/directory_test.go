@@ -13,9 +13,8 @@ import (
 
 // A directory's parent is renamed about by another user while the
 // state file's directories are made: no swap may turn the chmod of a
-// new directory onto an existing file. Before directories were made
-// through descriptors this widened a victim within a few attempts.
-// All paths are private test fixtures; it needs no privileges.
+// new directory onto an existing file. All paths are private test
+// fixtures; it needs no privileges.
 func TestDirectorySwapMustNotChmodUnrelatedFile(t *testing.T) {
 	base := t.TempDir()
 	owned, victims := filepath.Join(base, "owned"), filepath.Join(base, "victims")

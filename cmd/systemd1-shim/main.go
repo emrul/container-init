@@ -1,10 +1,9 @@
-// systemd1-shim is a thin wrapper that runs the
-// internal/systemd1shim package as a standalone process. This exists
-// because the org.freedesktop.systemd1 surface must be registered on
-// the session bus of a non-root user (e.g. Kasm's kasm-user), which
-// PID 1 / container-init cannot do directly: a session dbus-daemon
-// rejects EXTERNAL-auth'd connections whose SO_PEERCRED uid doesn't
-// match the bus owner.
+// systemd1-shim runs the internal/systemd1shim package as a
+// standalone process. The org.freedesktop.systemd1 surface must be
+// registered on the session bus of a non-root user (e.g. kasm-user),
+// which PID 1 cannot do directly: a session dbus-daemon rejects
+// EXTERNAL-auth connections whose SO_PEERCRED uid is not the bus
+// owner's.
 //
 // Run it from a container-init drop-in unit with:
 //

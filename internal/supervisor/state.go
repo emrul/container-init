@@ -20,9 +20,9 @@ import (
 
 // initStatus builds every unit's starting state: inactive/dead, not yet
 // run, since started. A socket records the service it activates; a
-// service records every loaded socket that names it. What Run's start
-// plan decides is known already, and recorded now so the first report
-// is complete: a skipped unit will never start, and a unit a socket or
+// service records every loaded socket that names it. Run's start plan
+// is fixed by New, so it is recorded here and the first report is
+// complete: a skipped unit will never start, and a unit a socket or
 // OnFailure= starts says so.
 func initStatus(units []*unit.Unit, started time.Time) map[string]*statefile.Unit {
 	attached := attachedServices(units)
@@ -147,8 +147,9 @@ func (s *Supervisor) recordExit(u *unit.Unit, exitErr error, restarting bool) {
 	}
 }
 
-// recordStopped records a unit stopped by reverse shutdown (or never
-// started because it had begun). A unit already failed stays failed.
+// recordStopped records a unit stopped by reverse shutdown, or not
+// started because shutdown had begun. A unit already failed stays
+// failed.
 func (s *Supervisor) recordStopped(name string) {
 	s.update(name, func(st *statefile.Unit) {
 		if st.Active != statefile.ActiveFailed && st.Active != statefile.ActiveInactive {

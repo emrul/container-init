@@ -65,7 +65,8 @@ func TestAuditConcurrentOnFailureShutdownOwnsEveryProcess(t *testing.T) {
 	})
 	defer func() { _ = syscall.Kill(first, syscall.SIGKILL); <-firstDone }()
 	go func() { s.fireOnFailure(u.Name); close(secondDone) }()
-	// The second invocation may legitimately coalesce or serialize after a fix.
+	// The second invocation may coalesce or wait its turn; either way
+	// shutdown must still stop the first one's process.
 	deadline := time.Now().Add(200 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		s.mu.Lock()

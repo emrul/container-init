@@ -78,9 +78,9 @@ func (p *propertyStub) GetAll(msg dbus.Message, iface string) (map[string]dbus.V
 	return map[string]dbus.Variant{}, nil
 }
 
-// Set silently accepts any write. We don't store unit state, so this
-// is a no-op -- but returning an error would break callers that
-// optimistically write properties they don't really need persisted.
+// Set accepts any write and stores nothing: returning an error would
+// break callers that optimistically write properties they do not need
+// persisted.
 func (p *propertyStub) Set(iface, name string, value dbus.Variant) *dbus.Error {
 	return nil
 }
