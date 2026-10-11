@@ -54,6 +54,30 @@ const (
 	RestartAlways
 )
 
+// EmergencyAction is the value of [Unit] FailureAction= / SuccessAction=:
+// what PID 1 does once the unit has failed, or finished, for good. Of
+// systemd's actions only those that make sense for a container's PID 1
+// are supported.
+type EmergencyAction int
+
+const (
+	ActionNone      EmergencyAction = iota
+	ActionExit                      // exit after a normal reverse shutdown
+	ActionExitForce                 // exit, killing every unit at once
+)
+
+func (a EmergencyAction) String() string {
+	switch a {
+	case ActionNone:
+		return "none"
+	case ActionExit:
+		return "exit"
+	case ActionExitForce:
+		return "exit-force"
+	}
+	return "unknown"
+}
+
 // ActivationMode selects how socket activation hands the public listener
 // to the service. Native uses sd_listen_fds (LISTEN_PID/LISTEN_FDS,
 // fd 3+); proxy keeps the listen fd in container-init and copies bytes
@@ -113,6 +137,17 @@ type Unit struct {
 	ConditionEnvironment    []string // each entry is "VAR=value" or "VAR"
 	ConditionUser           []string // uid or user name, optional "!" prefix
 	OnFailure               []string
+	// FailureAction= / SuccessAction=: what PID 1 does once the unit is
+	// failed, or inactive after a clean exit, and Restart= will not
+	// start it again. The ExitStatus pair overrides the status PID 1
+	// exits with when the action is exit or exit-force; when not Set,
+	// it is the exit code of the unit's main process.
+	FailureAction              EmergencyAction
+	SuccessAction              EmergencyAction
+	FailureActionExitStatus    int
+	FailureActionExitStatusSet bool
+	SuccessActionExitStatus    int
+	SuccessActionExitStatusSet bool
 
 	// [Service]
 	Type         ServiceType

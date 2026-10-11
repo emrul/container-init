@@ -46,6 +46,9 @@ type Supervisor struct {
 	euid, egid uint32 // container-init's own identity; see credentialPlan
 	stopOnce   sync.Once
 	stopCh     chan struct{}
+	// exitReq is the unit action taking the container down, if one
+	// is; see requestExit.
+	exitReq atomic.Pointer[exitRequest]
 	// stopTimeout bounds the whole reverse shutdown; see SetStopTimeout.
 	stopTimeout time.Duration
 	// spawnGate orders unit spawns against shutdown. A spawn holds it
@@ -260,8 +263,8 @@ func (s *Supervisor) waitDeps(u *unit.Unit) (failedDep string, ok bool) {
 
 // dependencyFailed records that u will not start because a unit it
 // Requires= failed, and passes the failure on to u's own dependents.
-// As in systemd, this is not a failure of u itself: OnFailure= and
-// ExitContainerOnFailure= do not fire.
+// As in systemd, this is not a failure of u itself: OnFailure=,
+// FailureAction= and ExitContainerOnFailure= do not fire.
 func (s *Supervisor) dependencyFailed(u *unit.Unit, dep string) {
 	s.logDependencyFailed(u, dep)
 	s.markFailed(u.Name)
@@ -507,8 +510,7 @@ func (s *Supervisor) runService(u *unit.Unit) {
 			s.recordExit(u, exitErr, false)
 			release()
 			s.unitFailed(u, exitErr)
-			log.Printf("unit %s: ExitContainerOnFailure -- initiating reverse shutdown", u.Name)
-			s.Stop()
+			s.exitOnFailure(u, exitErr)
 			return
 		}
 		again := shouldRestart(u, failed)
@@ -517,6 +519,8 @@ func (s *Supervisor) runService(u *unit.Unit) {
 			release()
 			if failed {
 				s.unitFailed(u, exitErr)
+			} else {
+				s.unitSucceeded(u)
 			}
 			return
 		}
@@ -544,11 +548,11 @@ func (s *Supervisor) claim(u *unit.Unit) (release func()) {
 // unitFailed handles a unit that failed and will not be started
 // again -- its Restart= policy gave up, or ExitContainerOnFailure= is
 // taking the container down. As in systemd, this is when OnFailure=
-// fires: once the unit is failed, not on each failure it restarts
-// from. A unit that never became ready (a oneshot that exited
-// non-zero, or any unit that could not be started) settles as failed
-// so its dependents are released or failed rather than waiting
-// forever.
+// and FailureAction= fire: once the unit is failed, not on each
+// failure it restarts from. A unit that never became ready (a oneshot
+// that exited non-zero, or any unit that could not be started) settles
+// as failed so its dependents are released or failed rather than
+// waiting forever.
 func (s *Supervisor) unitFailed(u *unit.Unit, err error) {
 	s.markFailed(u.Name)
 	// A start failure has already logged its cause.
@@ -559,6 +563,7 @@ func (s *Supervisor) unitFailed(u *unit.Unit, err error) {
 	for _, target := range u.OnFailure {
 		go s.fireOnFailure(target)
 	}
+	s.failureAction(u, s.mainStatus(u, err))
 }
 
 // fireOnFailure runs an OnFailure= target as a oneshot.
@@ -607,9 +612,9 @@ func (s *Supervisor) fireOnFailure(name string) {
 		s.event(name, "start_limit_hit", map[string]any{
 			"burst": u.StartLimitBurst, "interval_ms": u.StartLimitIntervalSec.Milliseconds(),
 		})
+		s.failureAction(u, -1)
 		if u.ExitContainerOnFailure {
-			log.Printf("OnFailure target %s requested container exit (start limit hit)", name)
-			s.Stop()
+			s.exitOnFailure(u, nil)
 		}
 		return
 	}
@@ -623,9 +628,15 @@ func (s *Supervisor) fireOnFailure(name string) {
 	s.recordExit(u, exitErr, false)
 	failed := exitErr != nil
 	s.event(name, "onfailure_exited", map[string]any{"failed": failed, "err": errString(exitErr)})
+	if failed {
+		s.failureAction(u, s.mainStatus(u, exitErr))
+	} else {
+		s.unitSucceeded(u)
+	}
 	if u.ExitContainerOnFailure {
-		log.Printf("OnFailure target %s requested container exit (failed=%v)", name, failed)
-		s.Stop()
+		// A handler that asks for it takes the container down however
+		// it ends.
+		s.exitOnFailure(u, exitErr)
 	}
 }
 
@@ -937,6 +948,7 @@ func (s *Supervisor) bindFailed(sock *unit.Unit) {
 	for _, target := range sock.OnFailure {
 		go s.fireOnFailure(target)
 	}
+	s.failureAction(sock, -1)
 }
 
 // activationEnd says why a socket-activated service stopped running.
@@ -947,7 +959,7 @@ const (
 	endIdle                            // exited and not restarted: listen again
 	endStartLimit                      // hit its start limit: the socket fails
 	endDependency                      // a unit it requires failed: the socket fails
-	endExit                            // ExitContainerOnFailure= is taking the container down
+	endExit                            // a unit action is taking the container down
 )
 
 // afterActivation says what a socket does once its service's
@@ -1169,7 +1181,7 @@ func (s *Supervisor) runActivated(svc *unit.Unit, extra *socketact.Bound) activa
 			s.recordExit(svc, exitErr, false)
 			release()
 			s.unitFailed(svc, exitErr)
-			s.Stop()
+			s.exitOnFailure(svc, exitErr)
 			return endExit
 		}
 		again := shouldRestart(svc, failed)
@@ -1178,6 +1190,11 @@ func (s *Supervisor) runActivated(svc *unit.Unit, extra *socketact.Bound) activa
 			release()
 			if failed {
 				s.unitFailed(svc, exitErr)
+			} else {
+				s.unitSucceeded(svc)
+			}
+			if s.stopping() {
+				return endExit // its FailureAction= / SuccessAction= fired
 			}
 			return endIdle
 		}
@@ -1215,7 +1232,7 @@ func (s *Supervisor) listeningAgain(sock, svc *unit.Unit) {
 }
 
 // socketFailed closes a socket that will not start its service again.
-// As in systemd, the socket's own OnFailure= fires.
+// As in systemd, the socket's own OnFailure= and FailureAction= fire.
 func (s *Supervisor) socketFailed(sock *unit.Unit, bound *socketact.Bound, fail *socketFailure) {
 	log.Printf("socket %s: failed: %s; closing the listener", sock.Name, fail.reason)
 	s.event(sock.Name, "socket_failed", map[string]any{"reason": fail.reason})
@@ -1227,6 +1244,7 @@ func (s *Supervisor) socketFailed(sock *unit.Unit, bound *socketact.Bound, fail 
 	for _, target := range sock.OnFailure {
 		go s.fireOnFailure(target)
 	}
+	s.failureAction(sock, -1)
 }
 
 // startLimiter enforces StartLimitBurst= / StartLimitIntervalSec= the
@@ -1276,9 +1294,9 @@ func (s *Supervisor) allowStart(u *unit.Unit) bool {
 }
 
 // startLimitHit fails a unit that would exceed its start limit: it is
-// not started again, and fails like any unit that gave up -- OnFailure=
-// and ExitContainerOnFailure= fire, and units that Requires= it are
-// failed if it never became ready.
+// not started again, and fails like any unit that gave up -- OnFailure=,
+// FailureAction= and ExitContainerOnFailure= fire, and units that
+// Requires= it are failed if it never became ready.
 func (s *Supervisor) startLimitHit(u *unit.Unit) {
 	log.Printf("unit %s: start limit hit (%d starts within %v); not starting again",
 		u.Name, u.StartLimitBurst, u.StartLimitIntervalSec)
@@ -1290,9 +1308,9 @@ func (s *Supervisor) startLimitHit(u *unit.Unit) {
 	for _, target := range u.OnFailure {
 		go s.fireOnFailure(target)
 	}
+	s.failureAction(u, -1)
 	if u.ExitContainerOnFailure {
-		log.Printf("unit %s: ExitContainerOnFailure -- initiating reverse shutdown", u.Name)
-		s.Stop()
+		s.exitOnFailure(u, nil)
 	}
 }
 
@@ -1331,10 +1349,19 @@ func (s *Supervisor) SetStopTimeout(d time.Duration) {
 // stopped, and units with no ordering between them stop in parallel.
 // Each gets its KillSignal= (default SIGTERM) and TimeoutStopSec=
 // (default 5s) before it is killed, and the whole shutdown is bounded
-// by the stop timeout. Returns the container exit code: 0 on graceful
+// by the stop timeout. A unit action that chose exit-force skips the
+// wait: every unit is killed at once. Returns the container exit code:
+// the status a unit action chose, if one did; otherwise 0 on graceful
 // shutdown, 1 if any unit had to be killed.
 func (s *Supervisor) shutdown() int {
 	deadline := time.Now().Add(s.stopTimeout)
+	req := s.exitReq.Load()
+	// killBy is when units stop being waited for. The trace and the
+	// state file keep the whole deadline for their final writes.
+	killBy := deadline
+	if req != nil && req.force {
+		killBy = time.Now()
+	}
 	// The trace's final flush shares this deadline instead of adding
 	// to it; tracing itself never blocks shutdown.
 	s.tracer.SetDeadline(deadline)
@@ -1360,7 +1387,7 @@ func (s *Supervisor) shutdown() int {
 	// expired closes at the deadline: from then on nothing waits for
 	// order, and every unit still running is stopped (and killed) now.
 	expired := make(chan struct{})
-	expiry := time.AfterFunc(time.Until(deadline), func() { close(expired) })
+	expiry := time.AfterFunc(time.Until(killBy), func() { close(expired) })
 	defer expiry.Stop()
 	var forced atomic.Bool
 	var wg sync.WaitGroup
@@ -1379,7 +1406,7 @@ func (s *Supervisor) shutdown() int {
 				s.closeSocket(u.Name)
 				return
 			}
-			if s.stopUnit(u, deadline) {
+			if s.stopUnit(u, killBy) {
 				forced.Store(true)
 			}
 		}(u)
@@ -1390,6 +1417,9 @@ func (s *Supervisor) shutdown() int {
 	exit := 0
 	if forced.Load() {
 		exit = 1
+	}
+	if req != nil && req.status >= 0 {
+		exit = req.status
 	}
 	if s.tracer != nil {
 		s.tracer.Event("reverse_shutdown_done", map[string]any{"exit": exit})

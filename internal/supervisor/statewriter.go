@@ -153,6 +153,7 @@ func (s *Supervisor) writeState(beat bool) {
 			Version:  w.version,
 			Started:  statefile.Time{Time: s.started},
 			Stopping: s.stopping(),
+			Exit:     s.stateExit(),
 		},
 		Units: w.last,
 	}

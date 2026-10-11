@@ -121,6 +121,19 @@ func TestCheck(t *testing.T) {
 	}
 }
 
+// TestCheckStoppingForUnitAction: while a unit's action takes the
+// container down, health says which.
+func TestCheckStoppingForUnitAction(t *testing.T) {
+	f := file(map[string]statefile.Unit{"a.service": crashed})
+	f.PID1.Stopping = true
+	status := 3
+	f.PID1.Exit = &statefile.Exit{Unit: "a.service", Action: "FailureAction=exit", Result: "exit-code", Status: &status}
+	ok, why := Check(f, now, nil, DefaultMaxAge)
+	if want := "shutting down: FailureAction=exit of a.service (exit-code)"; ok || !strings.Contains(why, want) {
+		t.Errorf("Check = %v %q, want unhealthy containing %q", ok, why, want)
+	}
+}
+
 func TestCheckStaleAndStopping(t *testing.T) {
 	f := file(map[string]statefile.Unit{"a.service": running})
 	f.Written = at(now.Add(-31 * time.Second))

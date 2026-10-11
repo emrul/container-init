@@ -458,6 +458,26 @@ func TestBadValueIsError(t *testing.T) {
 			body: "[Socket]\nListenStream=4902\nSocketMode=99q9\nService=foo.service\n",
 			want: "SocketMode",
 		},
+		{
+			name: "failureaction poweroff",
+			body: "[Unit]\nFailureAction=poweroff\n[Service]\nExecStart=/bin/true\n",
+			want: "FailureAction: \"poweroff\" not supported",
+		},
+		{
+			name: "successaction",
+			body: "[Unit]\nSuccessAction=bye\n[Service]\nExecStart=/bin/true\n",
+			want: "SuccessAction",
+		},
+		{
+			name: "exit status range",
+			body: "[Unit]\nFailureActionExitStatus=256\n[Service]\nExecStart=/bin/true\n",
+			want: "FailureActionExitStatus",
+		},
+		{
+			name: "exit status word",
+			body: "[Unit]\nSuccessActionExitStatus=three\n[Service]\nExecStart=/bin/true\n",
+			want: "SuccessActionExitStatus",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -511,5 +531,50 @@ func TestSplitAssignments(t *testing.T) {
 	}
 	if _, err := splitAssignments(`A="open`); err == nil {
 		t.Error("unterminated quote accepted")
+	}
+}
+
+// TestUnitActions: FailureAction= / SuccessAction= and their exit
+// statuses parse as in systemd -- empty means the default -- and take
+// the ${VAR:-default} form like any value.
+func TestUnitActions(t *testing.T) {
+	cases := []struct {
+		name               string
+		body               string
+		failure, success   EmergencyAction
+		failStatus, okStat int // -1: not set
+	}{
+		{"defaults", "", ActionNone, ActionNone, -1, -1},
+		{"exit", "FailureAction=exit\nSuccessAction=exit-force\n", ActionExit, ActionExitForce, -1, -1},
+		{"none", "FailureAction=none\nSuccessAction=\n", ActionNone, ActionNone, -1, -1},
+		{"statuses", "FailureActionExitStatus=3\nSuccessActionExitStatus=0\n", ActionNone, ActionNone, 3, 0},
+		{"empty status resets", "FailureActionExitStatus=3\nFailureActionExitStatus=\n", ActionNone, ActionNone, -1, -1},
+		{"expanded", "FailureAction=${CI_TEST_UNSET_ACTION:-exit}\nFailureActionExitStatus=${CI_TEST_UNSET_STATUS:-3}\n", ActionExit, ActionNone, 3, -1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeUnit(t, dir, "a.service", "[Unit]\n"+tc.body+"[Service]\nExecStart=/bin/true\n")
+			units, _, err := LoadDir(dir, Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			u := units[0]
+			if u.FailureAction != tc.failure || u.SuccessAction != tc.success {
+				t.Errorf("actions = %v / %v, want %v / %v", u.FailureAction, u.SuccessAction, tc.failure, tc.success)
+			}
+			status := func(set bool, v int) int {
+				if !set {
+					return -1
+				}
+				return v
+			}
+			if got := status(u.FailureActionExitStatusSet, u.FailureActionExitStatus); got != tc.failStatus {
+				t.Errorf("FailureActionExitStatus = %d, want %d", got, tc.failStatus)
+			}
+			if got := status(u.SuccessActionExitStatusSet, u.SuccessActionExitStatus); got != tc.okStat {
+				t.Errorf("SuccessActionExitStatus = %d, want %d", got, tc.okStat)
+			}
+		})
 	}
 }

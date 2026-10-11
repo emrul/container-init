@@ -278,13 +278,13 @@ Drop-ins participate in the supervisor's full lifecycle:
   load warning, so `--validate` catches it. Each
   step logs a line (`failed to start`, `failed`, `not started: required
   unit X failed`). A dependency failure does not fire the dependent's
-  own `OnFailure=` / `ExitContainerOnFailure=`.
+  own `OnFailure=` / `FailureAction=` / `ExitContainerOnFailure=`.
 - **Restart= / RestartSec= / StartLimitBurst= / StartLimitIntervalSec=** --
   per-unit restart policy and rate limiting. Every start counts, the
   first and each restart; a unit that would start more than
   `StartLimitBurst=` times within `StartLimitIntervalSec=` is not
-  started again and fails (`OnFailure=` / `ExitContainerOnFailure=`
-  fire, `Requires=` + `After=` dependents fail if it never became ready). The
+  started again and fails (`OnFailure=` / `FailureAction=` /
+  `ExitContainerOnFailure=` fire, `Requires=` + `After=` dependents fail if it never became ready). The
   limit directives belong in `[Unit]`, as in systemd, and are also
   accepted in `[Service]`. Setting one alone gets systemd's default
   for the other (5 starts / 10s), and `0` in either disables the
@@ -336,8 +336,9 @@ Drop-ins participate in the supervisor's full lifecycle:
   `OnFailure=` fires, and its service, which needs it, fails too, so
   units that `Requires=` and order `After=` either one are not
   started.
-- **Reverse shutdown** -- on SIGTERM / SIGINT, or when
-  `ExitContainerOnFailure=` fires, units stop in reverse dependency
+- **Reverse shutdown** -- on SIGTERM / SIGINT, or when a unit's
+  `FailureAction=` / `SuccessAction=` / `ExitContainerOnFailure=`
+  fires, units stop in reverse dependency
   order, as in systemd: a unit is stopped once every unit ordered
   `After=` it (or that it orders `Before=`) has stopped, and units with
   no ordering between them stop in parallel. Each is sent its
@@ -356,10 +357,41 @@ Drop-ins participate in the supervisor's full lifecycle:
   service is a dependency cycle and the unit set is refused at
   startup. `ExecStop=` / `ExecStopPost=` are
   parsed but not run.
-- **ExitContainerOnFailure=true** -- fail-secure: take the whole
-  container down via reverse shutdown on this unit's first failure,
-  even one `Restart=` would have recovered from; `OnFailure=` fires on
-  the way down. Useful for compliance gates an image author owns.
+- **FailureAction= / SuccessAction=** -- what PID 1 does once this
+  unit is done for good, as in systemd: `none` (the default), `exit`
+  (reverse shutdown, then exit) or `exit-force` (exit without waiting
+  for units to stop: each is sent its `KillSignal=` and killed at
+  once). `FailureAction=` fires when the unit fails and `Restart=` will
+  not start it again -- `Restart=no`, `Restart=on-failure` once the
+  start limit is hit, a start failure -- and also for a `.socket` that
+  fails. `SuccessAction=` fires when a service exits cleanly and is not
+  restarted, so it never fires under `Restart=always`, and a
+  `RemainAfterExit=yes` oneshot stays active and does not fire it. A
+  socket-activated service is no exception: each clean exit makes it
+  inactive. Neither fires for a unit stopped by reverse shutdown, or one
+  not started because a requirement failed. systemd's other actions
+  (`reboot`, `poweroff`, `halt`, ...) have no meaning for a
+  container's PID 1 and are refused at load. To end the container
+  whenever a service stops on its own, set `Restart=no` with both
+  actions.
+- **FailureActionExitStatus= / SuccessActionExitStatus=** -- the
+  status PID 1 exits with when that action is `exit` or `exit-force`:
+  0-255, or empty for the default, as in systemd. By default it is the
+  exit code of the unit's main process. When there is none -- it was
+  killed by a signal, could not start, or hit its start limit, or the
+  unit is a socket -- PID 1 exits as any shutdown would: 0, or 1 if a
+  unit had to be killed. Set it whenever an orchestrator must tell a
+  unit's end from a normal stop (`--restart=on-failure`, alerting).
+  The first unit to fire an action decides the status; the state file
+  records which (see [Health checks](#health-checks)).
+- **ExitContainerOnFailure=true** -- container-init's own fail-fast
+  switch: take the whole container down via reverse shutdown on this
+  unit's first failure, even one `Restart=` would have recovered from;
+  `OnFailure=` fires on the way down. Unlike `FailureAction=`, it does
+  not wait for `Restart=` to give up. The container exits with the
+  unit's exit code, or `FailureActionExitStatus=` when set, and
+  `FailureAction=exit-force` makes it forced. Useful for compliance
+  gates an image author owns.
 - **Environment= / EnvironmentFile=** -- `Environment=` takes
   whitespace-separated `K=V` assignments; `"..."` or `'...'` keep
   whitespace in one, whether they wrap the whole assignment
@@ -605,7 +637,12 @@ fails the rule for its kind:
 
 A unit that will never start this boot (a failed condition, or a
 failed or missing requirement) fails. Without `--require`, any failed
-unit makes the container unhealthy. The heartbeat advances only while
+unit makes the container unhealthy. When a unit's `FailureAction=`,
+`SuccessAction=` or `ExitContainerOnFailure=` takes the container
+down, the file records which unit, the directive and the exit status
+(`pid1.exit`), and `health` names it. A restarted container rewrites
+the file, so afterwards the log line (`unit X: FailureAction=exit --
+initiating reverse shutdown`) and the exit status are the record. The heartbeat advances only while
 the supervisor passes its own checks -- its state lock can be taken,
 the child reaper answers, and no unit's exit has gone unhandled -- so a
 hung container-init goes stale and unhealthy.

@@ -75,6 +75,9 @@ func Check(f *statefile.File, now time.Time, require []string, maxAge time.Durat
 		return false, fmt.Sprintf("heartbeat stale: written %s ago (max %s)", age.Truncate(time.Second), maxAge)
 	}
 	if f.PID1.Stopping {
+		if e := f.PID1.Exit; e != nil {
+			return false, fmt.Sprintf("container-init is shutting down: %s of %s (%s)", e.Action, e.Unit, e.Result)
+		}
 		return false, "container-init is shutting down"
 	}
 	if len(require) == 0 {

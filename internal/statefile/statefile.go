@@ -34,6 +34,22 @@ type PID1 struct {
 	Version  string `json:"version"`
 	Started  Time   `json:"started"`
 	Stopping bool   `json:"stopping"`
+	// Exit, once a unit's FailureAction=, SuccessAction= or
+	// ExitContainerOnFailure= is taking the container down, says which.
+	Exit *Exit `json:"exit,omitempty"`
+}
+
+// Exit is the unit action taking the container down.
+type Exit struct {
+	Unit string `json:"unit"`
+	// Action is the directive that fired: FailureAction=exit,
+	// SuccessAction=exit-force, ExitContainerOnFailure=, ...
+	Action string `json:"action"`
+	// Result is the unit's result when it fired.
+	Result string `json:"result"`
+	// Status is what PID 1 exits with, when the unit decides it;
+	// absent, it is shutdown's own (0, or 1 if a unit was killed).
+	Status *int `json:"status,omitempty"`
 }
 
 // Unit is one unit's state. The words are systemd's where it has them.

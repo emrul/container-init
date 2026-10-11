@@ -317,6 +317,26 @@ func (l *loader) applyUnitSection(u *Unit, name, value string) error {
 		u.OnFailure = append(u.OnFailure, splitWords(value)...)
 	case "StartLimitBurst", "StartLimitIntervalSec":
 		return l.applyStartLimit(u, name, value)
+	case "FailureAction", "SuccessAction":
+		a, err := parseEmergencyAction(value)
+		if err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
+		if name == "FailureAction" {
+			u.FailureAction = a
+		} else {
+			u.SuccessAction = a
+		}
+	case "FailureActionExitStatus", "SuccessActionExitStatus":
+		code, set, err := parseExitStatus(value)
+		if err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
+		if name == "FailureActionExitStatus" {
+			u.FailureActionExitStatus, u.FailureActionExitStatusSet = code, set
+		} else {
+			u.SuccessActionExitStatus, u.SuccessActionExitStatusSet = code, set
+		}
 	default:
 		l.warn("Unit", name, "directive not in supported subset (ignored)")
 	}
@@ -685,6 +705,36 @@ func parseBool(value string) (bool, error) {
 		return false, nil
 	}
 	return false, fmt.Errorf("not a boolean: %q", value)
+}
+
+// parseEmergencyAction parses a FailureAction= / SuccessAction= value.
+// systemd's reboot, poweroff, halt, kexec and soft-reboot actions have
+// no meaning for a container's PID 1 and are refused rather than
+// guessed at.
+func parseEmergencyAction(value string) (EmergencyAction, error) {
+	switch strings.TrimSpace(value) {
+	case "", "none":
+		return ActionNone, nil
+	case "exit":
+		return ActionExit, nil
+	case "exit-force":
+		return ActionExitForce, nil
+	}
+	return ActionNone, fmt.Errorf("%q not supported (none|exit|exit-force)", value)
+}
+
+// parseExitStatus parses a *ActionExitStatus= value: 0-255, or empty
+// for the default (set=false), as in systemd.
+func parseExitStatus(value string) (code int, set bool, err error) {
+	v := strings.TrimSpace(value)
+	if v == "" {
+		return 0, false, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 || n > 255 {
+		return 0, false, fmt.Errorf("%q is not an exit status (0-255, or empty for the default)", value)
+	}
+	return n, true, nil
 }
 
 // parseListener turns a Listen{Stream,Datagram}= value into a

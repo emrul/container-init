@@ -24,6 +24,34 @@ func sample() *File {
 	}
 }
 
+// TestExitRoundTrip: pid1.exit survives a round trip, and a status
+// shutdown decides is left out.
+func TestExitRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	f := sample()
+	status := 3
+	f.PID1.Stopping = true
+	f.PID1.Exit = &Exit{Unit: "a.service", Action: "FailureAction=exit", Result: ResultSignal, Status: &status}
+	if _, err := Write(path, f); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Read(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e := got.PID1.Exit; e == nil || *e.Status != 3 || e.Unit != "a.service" || e.Action != "FailureAction=exit" || e.Result != ResultSignal {
+		t.Errorf("pid1.exit = %+v", got.PID1.Exit)
+	}
+	f.PID1.Exit.Status = nil
+	if _, err := Write(path, f); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	if strings.Contains(string(data), `"status"`) {
+		t.Errorf("status written though shutdown decides it:\n%s", data)
+	}
+}
+
 func TestWriteReadRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	if _, err := Write(path, sample()); err != nil {
@@ -41,7 +69,8 @@ func TestWriteReadRoundTrip(t *testing.T) {
 	if !strings.Contains(string(data), `"written": "2026-09-29T16:03:12Z"`) {
 		t.Errorf("written not UTC whole seconds:\n%s", data)
 	}
-	if strings.Contains(string(data), `"never"`) || strings.Contains(string(data), `"sockets"`) {
+	if strings.Contains(string(data), `"never"`) || strings.Contains(string(data), `"sockets"`) ||
+		strings.Contains(string(data), `"exit"`) {
 		t.Errorf("empty optional fields written:\n%s", data)
 	}
 }

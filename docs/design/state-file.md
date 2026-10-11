@@ -88,6 +88,18 @@ seconds.
 - `pid1.version`: the string `-version` prints, `v` included.
 - `pid1.started`: when PID 1 started.
 - `pid1.stopping`: true once PID 1 begins shutdown.
+- `pid1.exit`: present once a unit's `FailureAction=`,
+  `SuccessAction=` or `ExitContainerOnFailure=` is taking the
+  container down, and absent otherwise (a SIGTERM, a running
+  container). `unit` is the unit, `action` the directive that fired
+  (`FailureAction=exit`, `SuccessAction=exit-force`,
+  `ExitContainerOnFailure=`), `result` the unit's `result` when it
+  fired, and `status` the status PID 1 will exit with when the unit
+  decides it -- its `*ActionExitStatus=`, or its main process's exit
+  code. Without `status`, PID 1 exits as any shutdown does: 0, or 1 if
+  a unit had to be killed. Only the first unit to fire is recorded. For
+  example:
+  `"pid1": {"version": "v1.5.0", "started": "2026-10-11T09:00:00Z", "stopping": true, "exit": {"unit": "kasmvnc.service", "action": "FailureAction=exit", "result": "signal", "status": 3}}`.
 - `type`: `simple`, `oneshot` or `forking` (what the parser accepts),
   or `socket` for socket units.
 - `active`: `inactive`, `activating`, `active`, `deactivating` or
@@ -347,7 +359,9 @@ Unhealthy when any of:
 
 - `written` is older than `--max-age` (default 30 s, three missed
   heartbeats).
-- `pid1.stopping` is true.
+- `pid1.stopping` is true. When `pid1.exit` is present, the line
+  names it: `container-init is shutting down: FailureAction=exit of
+  kasmvnc.service (signal)`.
 - With `--require`: a named unit is missing from the file, or does
   not pass the rule for its kind below.
 - Without `--require`: any unit is `failed`.
