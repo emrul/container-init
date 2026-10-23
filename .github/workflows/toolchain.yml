@@ -28,12 +28,14 @@ jobs:
           current=$(sed -n 's/^toolchain //p' go.mod)
           echo "latest=$latest current=$current"
           echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          # setup-go takes the bare number; go.dev/VERSION says "go1.27.2".
+          echo "semver=${latest#go}" >> "$GITHUB_OUTPUT"
           if [ "$latest" != "$current" ]; then echo "bump=true" >> "$GITHUB_OUTPUT"; fi
 
       - if: steps.ver.outputs.bump == 'true'
         uses: actions/setup-go@v7
         with:
-          go-version: ${{ steps.ver.outputs.latest }}
+          go-version: ${{ steps.ver.outputs.semver }}
 
       - name: Bump, test, open PR
         if: steps.ver.outputs.bump == 'true'
